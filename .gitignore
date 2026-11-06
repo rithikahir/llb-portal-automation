@@ -1,0 +1,15 @@
+# secrets & session data — never commit
+.env
+renew_gate.json
+recharge_log.csv
+
+# python build artefacts
+__pycache__/
+*.pyc
+
+# research captures contain tokens / customer PII
+ResearchFiles/
+*.har
+recharge_done_file
+requestcall.txt
+customer_details_fetching
