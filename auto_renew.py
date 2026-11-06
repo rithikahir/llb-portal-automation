@@ -4,7 +4,10 @@ auto_renew.py — trigger a portal plan renewal (recharge) for a customer id, no
 
 Python port of auto_renew.ps1. Usage:
 
-    python auto_renew.py <CustomerId> [--force] [--env PATH]
+Usage:
+
+    python auto_renew.py <CustomerId> [--force] [--curl] [--dry-run] [--env PATH]
+    python auto_renew.py --by-name "customer name" [--force] [--curl] [--dry-run]
 
 Reads credentials from .env next to this script (format: `username :- value`
 / `password :- value`). No values are hard-coded: customer, plan, cost, dates
@@ -53,7 +56,7 @@ from urllib.parse import quote
 # reuse the login/session machinery that is already working in crm_customers.py
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 try:
-    from crm_customers import Portal, hidden, parse_renew_dialog
+    from crm_customers import Portal, hidden, parse_renew_dialog, clean_records, parse_rows, update_panel
 except ImportError as exc:  # pragma: no cover
     raise SystemExit(f"error: need crm_customers.py in the same folder ({exc})")
 
@@ -228,7 +231,12 @@ def log_recharge(customer_id: str, customer_name: str, recharge_date: str,
 # ------------------------------------------------------------------ main flow
 def main() -> int:
     ap = argparse.ArgumentParser(description="One-shot portal renewal for a customer id (confirm-first, single submit).")
-    ap.add_argument("custid", help="numeric customer id (see: python crm_customers.py all)")
+    ap.add_argument("custid", nargs="?", default=None,
+                    help="numeric customer id (see: python crm_customers.py all); "
+                         "omit if using --by-name")
+    ap.add_argument("--by-name", help='resolve the customer by NAME or user id instead of an id, '
+                                      'e.g. --by-name "rohit tambe". Only proceeds when the match '
+                                      'is unique; lists all matches otherwise.')
     ap.add_argument("--force", action="store_true", help="skip the yes/no confirmation prompt")
     ap.add_argument("--bypass-gate", action="store_true",
                     help="skip the anti-double-recharge gate (only after verifying the Recent "
@@ -240,18 +248,28 @@ def main() -> int:
                          "Postman) with the freshly parsed values, cookies and token")
     ap.add_argument("--env", help="path to .env (default: next to this script)")
     args = ap.parse_args()
-    cust_id = args.custid.strip()
-    if not cust_id.isdigit():
+
+    if args.by_name and args.custid:
+        ap.error("give EITHER a customer id OR --by-name, not both")
+    if not args.by_name and not args.custid:
+        ap.error("provide a customer id or --by-name")
+
+    cust_id = args.custid
+    if cust_id and not cust_id.strip().isdigit():
         ap.error("customer id must be a number")
+    by_name_mode = bool(args.by_name)
 
     env_path = Path(args.env) if args.env else Path(__file__).resolve().parent / ".env"
 
-    today = datetime.now().strftime("%d %b %Y")   # same format the portal report uses
-    gate_entries = gate_load()
+    gate_entries = []
     step = 0
+    today = datetime.now().strftime("%d %b %Y")   # same format the portal report uses
+    gate_reason = None
 
-    # --- 0. anti-double-recharge gate (local marker; no network needed) -----
-    gate_reason = gate_block_reason(gate_entries, cust_id, today)
+    # --- 0. anti-double-recharge gate (id-mode: local marker, no network) ---
+    if cust_id:
+        gate_entries = gate_load()
+        gate_reason = gate_block_reason(gate_entries, cust_id, today)
     if gate_reason and not args.bypass_gate:
         print("SAFETY GATE blocked this run:", file=sys.stderr)
         print("  " + gate_reason, file=sys.stderr)
@@ -264,6 +282,39 @@ def main() -> int:
     step += 1
     portal = Portal(env_path)
     portal.login()
+
+    # --- 1b. name-mode: resolve the customer id from the Accounts grid ------
+    if by_name_mode:
+        delta = portal.accounts_search()
+        records = clean_records(parse_rows(update_panel(delta)))
+        q = args.by_name.strip().lower()
+        matches = [r for r in records
+                   if q in (r.get("name") or "").lower() or q == (r.get("user_id") or "").lower()]
+        if not matches:
+            print(f"[resolve] no customer found matching {args.by_name!r}; aborting (nothing submitted)", file=sys.stderr)
+            return 1
+        if len(matches) > 1:
+            print(f"[resolve] {len(matches)} customers match {args.by_name!r} — refusing to guess:", file=sys.stderr)
+            for r in sorted(matches, key=lambda x: str(x.get("name") or "")):
+                print(f"            customer id={r.get('customer_id')}  user={r.get('user_id')}  "
+                      f"name={r.get('name')}  status={r.get('status')}  expiry={r.get('expiry')}", file=sys.stderr)
+            print("            re-run with the exact user id, or a longer --by-name phrase "
+                  "(e.g. full name).", file=sys.stderr)
+            return 1
+        m = matches[0]
+        cust_id = str(m.get("customer_id"))
+        print(f"[resolve] unique match -> customer id {cust_id} "
+              f"({m.get('user_id')} / {m.get('name')}, status {m.get('status')}, expiry {m.get('expiry')})")
+        # run the local gate now that we know the id
+        gate_entries = gate_load()
+        gate_reason = gate_block_reason(gate_entries, cust_id, today)
+        if gate_reason and not args.bypass_gate:
+            print("SAFETY GATE blocked this run:", file=sys.stderr)
+            print("  " + gate_reason, file=sys.stderr)
+            return 4
+        if gate_reason:
+            print("[gate] --bypass-gate given: local gate cleared for this run "
+                  "(ensure you verified the Recent Purchase/Renew Report first)")
 
     # --- 2. accounts page -> request verification token ---------------------
     step += 1
