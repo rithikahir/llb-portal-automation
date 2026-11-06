@@ -141,6 +141,8 @@ def gate_save(entries: list[dict]) -> None:
     GATE_FILE.write_text(json.dumps(entries, indent=2, ensure_ascii=False), encoding="utf-8")
 
 
+
+
 def gate_block_reason(entries: list[dict], cust_id: str, today: str) -> str | None:
     """Return a blocking reason for this customer today, or None."""
     for e in entries:
@@ -233,10 +235,13 @@ def main() -> int:
     ap = argparse.ArgumentParser(description="One-shot portal renewal for a customer id (confirm-first, single submit).")
     ap.add_argument("custid", nargs="?", default=None,
                     help="numeric customer id (see: python crm_customers.py all); "
-                         "omit if using --by-name")
+                         "omit if using --by-name/--userid")
     ap.add_argument("--by-name", help='resolve the customer by NAME or user id instead of an id, '
                                       'e.g. --by-name "rohit tambe". Only proceeds when the match '
                                       'is unique; lists all matches otherwise.')
+    ap.add_argument("--userid", help='resolve the customer by USER ID (login name), case-insensitive, '
+                                     'e.g. --userid ROHITT or --userid rohitt. Only proceeds when '
+                                     'the match is unique.')
     ap.add_argument("--force", action="store_true", help="skip the yes/no confirmation prompt")
     ap.add_argument("--bypass-gate", action="store_true",
                     help="skip the anti-double-recharge gate (only after verifying the Recent "
@@ -249,15 +254,19 @@ def main() -> int:
     ap.add_argument("--env", help="path to .env (default: next to this script)")
     args = ap.parse_args()
 
-    if args.by_name and args.custid:
-        ap.error("give EITHER a customer id OR --by-name, not both")
-    if not args.by_name and not args.custid:
-        ap.error("provide a customer id or --by-name")
+    selectors = sum(1 for x in (args.custid, args.by_name, args.userid) if x)
+    if selectors > 1:
+        ap.error("give only ONE customer selector: a customer id, --by-name, OR --userid")
+    if selectors == 0:
+        ap.error("provide a customer id, --by-name, or --userid")
 
     cust_id = args.custid
-    if cust_id and not cust_id.strip().isdigit():
-        ap.error("customer id must be a number")
+    if cust_id:
+        cust_id = cust_id.strip()
+        if not cust_id.isdigit():
+            ap.error("customer id must be a number")
     by_name_mode = bool(args.by_name)
+    userid_mode = bool(args.userid)
 
     env_path = Path(args.env) if args.env else Path(__file__).resolve().parent / ".env"
 
@@ -283,18 +292,24 @@ def main() -> int:
     portal = Portal(env_path)
     portal.login()
 
-    # --- 1b. name-mode: resolve the customer id from the Accounts grid ------
-    if by_name_mode:
+    # --- 1b. name/userid-mode: resolve the customer id from the Accounts grid
+    if by_name_mode or userid_mode:
         delta = portal.accounts_search()
         records = clean_records(parse_rows(update_panel(delta)))
-        q = args.by_name.strip().lower()
-        matches = [r for r in records
-                   if q in (r.get("name") or "").lower() or q == (r.get("user_id") or "").lower()]
+        if userid_mode:
+            q = args.userid.strip().lower()
+            matches = [r for r in records if (r.get("user_id") or "").lower() == q]
+            sel_label = f"user id {args.userid!r}"
+        else:
+            q = args.by_name.strip().lower()
+            matches = [r for r in records
+                       if q in (r.get("name") or "").lower() or q == (r.get("user_id") or "").lower()]
+            sel_label = f"name {args.by_name!r}"
         if not matches:
-            print(f"[resolve] no customer found matching {args.by_name!r}; aborting (nothing submitted)", file=sys.stderr)
+            print(f"[resolve] no customer found matching {sel_label}; aborting (nothing submitted)", file=sys.stderr)
             return 1
         if len(matches) > 1:
-            print(f"[resolve] {len(matches)} customers match {args.by_name!r} — refusing to guess:", file=sys.stderr)
+            print(f"[resolve] {len(matches)} customers match {sel_label} — refusing to guess:", file=sys.stderr)
             for r in sorted(matches, key=lambda x: str(x.get("name") or "")):
                 print(f"            customer id={r.get('customer_id')}  user={r.get('user_id')}  "
                       f"name={r.get('name')}  status={r.get('status')}  expiry={r.get('expiry')}", file=sys.stderr)
