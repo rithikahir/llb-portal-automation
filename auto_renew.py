@@ -6,8 +6,12 @@ Python port of auto_renew.ps1. Usage:
 
 Usage:
 
-    python auto_renew.py <CustomerId> [--force] [--curl] [--dry-run] [--env PATH]
-    python auto_renew.py --by-name "customer name" [--force] [--curl] [--dry-run]
+    python auto_renew.py [--account NAME] <CustomerId> [--force] [--curl] [--dry-run] [--env PATH]
+    python auto_renew.py [--account NAME] --by-name "customer name" [--force] [--curl] [--dry-run]
+
+The `--account NAME` flag picks which credential pair in .env to log in
+with: 'reseller' (default = the plain username/password pair), or a suffix
+name such as 'shree' (username_shree/password_shree) or 'shreeganesh'.
 
 Reads credentials from .env next to this script (format: `username :- value`
 / `password :- value`). No values are hard-coded: customer, plan, cost, dates
@@ -163,11 +167,13 @@ def gate_block_reason(entries: list[dict], cust_id: str, today: str) -> str | No
     return None
 
 
-def gate_write_attempt(entries: list[dict], cust_id: str, username: str, today: str) -> list[dict]:
+def gate_write_attempt(entries: list[dict], cust_id: str, username: str, today: str,
+                       account: str = "reseller") -> list[dict]:
     """Record 'attempted' BEFORE the POST fires, superseding stale unresolved/failed entries."""
     entries = [e for e in entries
                if not (str(e.get("customer_id", "")) == cust_id and e.get("status") in ("attempted", "unknown", "failed"))]
-    entries.append({"customer_id": cust_id, "username": username, "date": today,
+    entries.append({"customer_id": cust_id, "username": username, "account": account,
+                    "date": today,
                     "ts": datetime.now().isoformat(timespec="seconds"), "status": "attempted"})
     gate_save(entries)
     return entries
@@ -252,6 +258,11 @@ def main() -> int:
                     help="instead of submitting, print a ready-to-import cURL command (e.g. for "
                          "Postman) with the freshly parsed values, cookies and token")
     ap.add_argument("--env", help="path to .env (default: next to this script)")
+    ap.add_argument("--account", default="reseller",
+                    help="which credential pair in .env to log in with: 'reseller' (default) "
+                         "reads the plain username/password pair; any other name reads "
+                         "username_<NAME>/password_<NAME> (e.g. --account shree, "
+                         "--account shreeganesh)")
     args = ap.parse_args()
 
     selectors = sum(1 for x in (args.custid, args.by_name, args.userid) if x)
@@ -289,7 +300,7 @@ def main() -> int:
 
     # --- 1. login (reuses the verified Portal class) -------------------------
     step += 1
-    portal = Portal(env_path)
+    portal = Portal(env_path, account=args.account)
     portal.login()
 
     # --- 1b. name/userid-mode: resolve the customer id from the Accounts grid
@@ -397,7 +408,7 @@ def main() -> int:
     if rep_when:
         print(f"[gate] --bypass-gate given: report shows a transaction today ({rep_when}) - proceeding anyway")
 
-    if not args.force:
+    if not args.force and not args.dry_run:
         try:
             conf = input(f"Submit renewal for {js_user} (plan {plan_id}, cost {cost})? [yes/NO] ")
         except EOFError:
@@ -496,7 +507,7 @@ def main() -> int:
 
     # --- 4. submit EXACTLY ONCE (gate marker written BEFORE the POST) -------
     step += 1
-    gate_entries = gate_write_attempt(gate_entries, cust_id, js_user, today)
+    gate_entries = gate_write_attempt(gate_entries, cust_id, js_user, today, args.account)
     try:
         r = portal.s.post(
             RENEW_POST, data=body, timeout=60,

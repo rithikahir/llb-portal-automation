@@ -66,13 +66,33 @@ pip install --user requests beautifulsoup4 lxml
 
 ## Setup (all scripts)
 
-Both scripts read credentials from a file named **`.env`** in the script
-directory (or pass a custom path with `--env`). Expected format:
+The scripts read credentials from a file named **`.env`** in the script
+directory (or pass a custom path with `--env`). Expected format — the plain
+pair is the **default login** (called `reseller`):
 
 ```
 username :- YOUR_RESELLER_USERNAME
 password :- YOUR_RESELLER_PASSWORD
 ```
+
+Extra portal logins are stored as suffixed pairs and selected per run with
+`--account NAME` (all three scripts support this):
+
+```
+username_shreeganesh :- ...
+password_shreeganesh :- ...
+username_shree :- ...
+password_shree :- ...
+```
+
+- `python crm_customers.py --account shree all`
+- `python auto_renew.py --account shree 123456`
+- `python transfer_balance.py --account shree ...`
+
+Any future login works the same way: add `username_<NAME>` / `password_<NAME>`
+to `.env` and run with `--account <NAME>`. If a name is wrong, the script
+aborts immediately and lists the accounts it *did* find (values are never
+printed).
 
 Careful: the separator is `:-` (colon-dash), not `=`. Leading/trailing spaces
 are fine. Never commit or share this file — it is your portal password.
@@ -111,9 +131,10 @@ works: `python crm_customers.py all --limit 0 > all_customers.txt`.
 
 ### Global flag
 
-| Flag         | Default                   | Description                                                                                     |
-|--------------|---------------------------|-------------------------------------------------------------------------------------------------|
-| `--env PATH` | `crm_customers.py` directory | Path to the credential file (must use the `username :-` / `password :-` format).              |
+| Flag              | Default                      | Description                                                                                     |
+|-------------------|------------------------------|-------------------------------------------------------------------------------------------------|
+| `--env PATH`      | `crm_customers.py` directory | Path to the credential file (must use the `username :-` / `password :-` format).                |
+| `--account NAME`  | `reseller` (plain pair)      | Which login in `.env` to use: the plain pair by default, or `username_<NAME>/password_<NAME>` (e.g. `--account shree`). |
 
 ### `all` — fetch & clean all customers
 
@@ -242,6 +263,7 @@ more specific phrase or the numeric id.
 | `--dry-run`       | off     | Open the renew dialog and BUILD the payload, then stop — nothing is submitted or logged.                            |
 | `--curl`          | off     | Instead of submitting, print a complete one-shot cURL command (for Postman) built from live values.                 |
 | `--bypass-gate`   | off     | Skip the anti-double-recharge gate (local marker + today's report check). Use ONLY after verifying no recharge was made. |
+| `--account NAME`  | `reseller` (plain pair) | Which login in `.env` to use (e.g. `--account shree`). The customer grid, dialog, balance and gate then all refer to that account. |
 | `--env PATH`      | next to script | Path to the credential file.                                                                                 |
 
 ## What it does, step by step
@@ -405,7 +427,7 @@ python transfer_balance.py --partner-id 54 --amount 100 \
 
 | Flag | Meaning |
 |---|---|
-| `--account {shreeganesh,reseller}` | source login; keys `username(_shreeganesh)/password(_shreeganesh)` in `.env`. Default `shreeganesh`. |
+| `--account {shreeganesh,reseller,...}` | source login; looks up `username_<NAME>/password_<NAME>` in `.env` (`reseller` = plain pair). Default `shreeganesh`. Only use a login that legitimately owns the wallet being debited. |
 | `--level {sub,lco}` | Entity Level for the recipient dropdown (default `sub`). |
 | `--partner-id` / `--partner-name` | (required, pick one) the transfer target. |
 | `--amount` | (required) amount in ₹; must be > 0 and ≤ the live wallet balance. |
@@ -475,6 +497,7 @@ transfer_datetime,from_account,partner_id,partner_name,amount,remark
 | Symptom | Cause / fix |
 |---|---|
 | `credentials not found in .env` | `.env` missing, or lines don't match `username :- value` / `password :- value`. Check the exact `:-` separator. |
+| `credentials for account 'X' not found ... accounts available: ...` | No `username_X` / `password_X` pair in `.env` (or the name is misspelled). The error lists the accounts it found — values are never printed. |
 | `login failed (no AuthToken cookie)` | Wrong credentials, or the portal changed its login flow. Verify manually in a browser. |
 | Mojibake (`锟`) in the console | Windows console code-page issue; use `chcp 65001` or rely on the CSV/JSON export which is proper UTF-8. |
 

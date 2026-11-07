@@ -64,19 +64,26 @@ def die(msg: str, code: int) -> "None":
 
 # ---------------------------------------------------------------- credentials
 def load_account(env_path: Path, account: str) -> dict:
-    """Read the chosen credential pair from .env. Format: `<key> :- <value>`."""
-    keys = {
-        "shreeganesh": ("username_shreeganesh", "password_shreeganesh"),
-        "reseller": ("username", "password"),
-    }[account]
+    """Read the chosen credential pair from .env (format: `<key> :- <value>`).
+
+    'reseller' = the plain username/password pair; any other name = the
+    `username_<name>` / `password_<name>` pair.
+    """
+    ukey = "username" if account == "reseller" else f"username_{account}"
+    pkey = "password" if account == "reseller" else f"password_{account}"
     creds = {}
     for line in env_path.read_text(encoding="utf-8", errors="ignore").splitlines():
-        for key in keys:
-            m = re.match(rf"\s*{re.escape(key)}\s*:-\s*(.+)", line)
-            if m:
-                creds[key.split("_")[0]] = m.group(1).strip()
+        m = re.match(rf"\s*{re.escape(ukey)}\s*:-\s*(.+)", line)
+        if m:
+            creds["username"] = m.group(1).strip()
+        m = re.match(rf"\s*{re.escape(pkey)}\s*:-\s*(.+)", line)
+        if m:
+            creds["password"] = m.group(1).strip()
     if len(creds) != 2:
-        raise RuntimeError(f"credentials for account '{account}' not found in {env_path}")
+        known = C.available_accounts(env_path)
+        raise RuntimeError(f"credentials for account '{account}' not found in {env_path} "
+                           f"(keys wanted: {ukey} / {pkey}) — accounts available: "
+                           + (", ".join(known) if known else "(none valid)"))
     return {"username": creds["username"], "password": creds["password"]}
 
 
@@ -380,8 +387,11 @@ def main() -> None:
     ap = argparse.ArgumentParser(
         description="GUARDED one-shot balance transfer on the Limerick reseller portal "
                     "(accounts tree: distributor -> sub-partner). Submits exactly once.")
-    ap.add_argument("--account", choices=("shreeganesh", "reseller"), default="shreeganesh",
-                    help="source login; default shreeganesh (= username_shreeganesh key in .env)")
+    ap.add_argument("--account", default="shreeganesh",
+                    help="source login; a name looking up username_<NAME>/password_<NAME> "
+                         "in .env ('reseller' = the plain username/password pair). "
+                         "Default: shreeganesh (the wallet that funds the transfers). "
+                         "Use ONLY a login that legitimately owns the wallet you debit")
     ap.add_argument("--level", choices=("sub", "lco"), default="sub",
                     help="Entity Level to pick the recipient dropdown from (default sub=Sub Distributor)")
     sel = ap.add_mutually_exclusive_group(required=True)

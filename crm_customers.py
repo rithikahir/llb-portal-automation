@@ -48,17 +48,39 @@ FIELD_NAMES = ["customer_id", "user_id", "name", "mobile", "status", "expiry", "
 
 
 # ---------------------------------------------------------------- utilities
-def load_env(path: Path) -> dict:
+def available_accounts(env_path: Path) -> list[str]:
+    """Suffixes ('shree', 'shreeganesh', ...) for every credential pair found in
+    .env. The plain pair (username/password) is returned as 'reseller'."""
+    accounts: dict[str, None] = {}                     # ordered set
+    for line in env_path.read_text(encoding="utf-8", errors="ignore").splitlines():
+        m = re.match(r"\s*username(_[A-Za-z0-9_]+)?\s*:-\s*(\S)", line)
+        if m:
+            accounts[m.group(1)[1:] if m.group(1) else "reseller"] = None
+    return list(accounts)
+
+
+def load_env(path: Path, account: str = "reseller") -> dict:
+    """Read the credential pair for `account` from .env.
+
+    'reseller' (the default) reads the plain `username :-` / `password :-`
+    pair; any other name reads `username_<name> :-` / `password_<name> :-`.
+    """
+    ukey = "username" if account == "reseller" else f"username_{account}"
+    pkey = "password" if account == "reseller" else f"password_{account}"
     creds = {}
     for line in path.read_text(encoding="utf-8", errors="ignore").splitlines():
-        m = re.match(r"\s*username\s*:-\s*(.+)", line)
+        m = re.match(r"\s*" + re.escape(ukey) + r"\s*:-\s*(.+)", line)
         if m:
             creds["username"] = m.group(1).strip()
-        m = re.match(r"\s*password\s*:-\s*(.+)", line)
+        m = re.match(r"\s*" + re.escape(pkey) + r"\s*:-\s*(.+)", line)
         if m:
             creds["password"] = m.group(1).strip()
     if "username" not in creds or "password" not in creds:
-        raise RuntimeError(f"credentials not found in {path}")
+        known = available_accounts(path)
+        raise RuntimeError(
+            f"credentials for account '{account}' not found in {path} "
+            f"(keys wanted: {ukey} / {pkey}) — accounts available: "
+            + (", ".join(known) if known else "(none valid)"))
     return creds
 
 
@@ -98,11 +120,12 @@ def to_iso(date_str: str | None) -> str | None:
 
 # ---------------------------------------------------------------- session
 class Portal:
-    def __init__(self, env_path: Path):
+    def __init__(self, env_path: Path, account: str = "reseller"):
         self.s = requests.Session()
         self.s.headers.update({"User-Agent": UA})
         self.token = ""
-        self.env = load_env(env_path)
+        self.account = account
+        self.env = load_env(env_path, account)
 
     def login(self) -> None:
         r0 = self.s.get(LOGIN_PAGE)
@@ -124,7 +147,7 @@ class Portal:
         has_auth = any(c.name == "AuthToken" for c in self.s.cookies)
         if not has_auth:
             raise RuntimeError("login failed (no AuthToken cookie) — check credentials")
-        print(f"[login] ok (AuthToken received)", file=sys.stderr)
+        print(f"[login] ok (AuthToken received) — account: {self.account}", file=sys.stderr)
 
     def accounts_search(self) -> str:
         """POST the 'Search' with alpha=ALL, wide dates, 500/page.
@@ -426,6 +449,11 @@ def cmd_get(portal: Portal, args) -> dict:
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--env", default=None, help="path to .env (default: script dir)")
+    ap.add_argument("--account", default="reseller",
+                    help="which credential pair in .env to log in with: 'reseller' (default) "
+                         "reads the plain username/password pair; any other name reads "
+                         "username_<NAME>/password_<NAME> (e.g. --account shree, "
+                         "--account shreeganesh)")
     sub = ap.add_subparsers(dest="cmd", required=True)
     ap_all = sub.add_parser("all", help="fetch & clean all customers")
     ap_all.add_argument("--limit", type=int, default=20, help="rows to display (0 = all)")
@@ -437,7 +465,7 @@ def main() -> None:
     args = ap.parse_args()
 
     env_path = Path(args.env) if args.env else Path(__file__).resolve().parent / ".env"
-    portal = Portal(env_path)
+    portal = Portal(env_path, account=args.account)
     portal.login()
 
     if args.cmd == "all":
