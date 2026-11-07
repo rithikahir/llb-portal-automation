@@ -2,6 +2,8 @@
 .env
 renew_gate.json
 recharge_log.csv
+transfer_gate.json
+transfer_log.csv
 
 # python build artefacts
 __pycache__/

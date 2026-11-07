@@ -18,7 +18,7 @@ from the portal's live responses** on every run — stale values are never reuse
 ## Table of contents
 
 - [Requirements](#requirements)
-- [Setup (both scripts)](#setup-both-scripts)
+- [Setup (all scripts)](#setup-all-scripts)
 - [Script 1 — `crm_customers.py` (customer data)](#script-1--crm_customerspy-customer-data)
   - [Usage](#usage)
   - [Commands & flags](#commands--flags)
@@ -34,6 +34,13 @@ from the portal's live responses** on every run — stale values are never reuse
   - [Exit codes](#exit-codes)
   - [Recharge log (`recharge_log.csv`)](#recharge-log-recharge_logcsv)
   - [Generating a cURL for Postman (`--curl`)](#generating-a-curl-for-postman---curl)
+- [Script 3 — `transfer_balance.py` (guarded wallet transfer)](#script-3--transfer_balancepy-guarded-wallet-transfer)
+  - [Usage](#usage-2)
+  - [Partner selectors](#partner-selectors)
+  - [Flags](#flags-1)
+  - [What it does, step by step](#what-it-does-step-by-step-1)
+  - [The anti-double-transfer gate](#the-anti-double-transfer-gate)
+  - [Transfer log (`transfer_log.csv`)](#transfer-log-transfer_logcsv)
 - [Troubleshooting](#troubleshooting)
 - [Sessions & security notes](#sessions--security-notes)
 - [Related files](#related-files)
@@ -57,7 +64,7 @@ pip install --user requests beautifulsoup4 lxml
 
 ---
 
-## Setup (both scripts)
+## Setup (all scripts)
 
 Both scripts read credentials from a file named **`.env`** in the script
 directory (or pass a custom path with `--env`). Expected format:
@@ -340,6 +347,127 @@ curl --request POST \
 
 ---
 
+# Script 3 — `transfer_balance.py` (guarded wallet transfer)
+
+Moves **real money** inside the partner tree by driving the portal's own
+"Manage Transfer Balance" page (`/Partner/TransferBalance.aspx`): it debits the
+source account's wallet (default: the `shreeganesh` login = distributor
+account) and instantly credits a sub-partner (e.g. the reseller's own child
+account). The result appears on both sides of the Balance Transfer History
+ledger as a same-timestamp `Dr`/`Cr` pair.
+
+> ⚠️ **Transfers are effectively one-way.** Only Limerick staff accounts have
+> ever been able to run `Reverse Balance` corrections. Treat every transfer
+> with the same care as a recharge — verify the summary before confirming.
+
+> ⚠️ The source wallet is shared money: it also funds recharges for *your*
+> customers and carries the running balance owed to Limerick.
+
+## Usage
+
+```powershell
+# always `python <script> <flags>` — never `.\transfer_balance.py`
+
+# normal flow: summary -> type yes -> submit exactly once -> verify on the ledger
+python transfer_balance.py --partner-name KHADKI --amount 100
+
+# by numeric partner id from the live dropdown (safer when names repeat)
+python transfer_balance.py --partner-id 54 --amount 100
+
+# safe test: resolves everything, builds and prints the payload — sends NOTHING
+python transfer_balance.py --partner-name KHADKI --amount 100 --dry-run
+
+# no confirmation prompt (page + gates + single-shot submit still apply)
+python transfer_balance.py --partner-id 54 --amount 100 --force
+
+# print a one-shot cURL instead of submitting (session-bound — see Script 2 notes)
+python transfer_balance.py --partner-id 54 --amount 100 --curl
+
+# use the plain reseller login as the source instead of shreeganesh
+python transfer_balance.py --partner-id 54 --amount 100 --account reseller
+
+# optional knobs
+python transfer_balance.py --partner-id 54 --amount 100 \
+  --remark "topup for recharges" --payment-received no --date "07 Nov 2026"
+```
+
+## Partner selectors
+
+- `--partner-name <text>` — case-insensitive substring; must match **exactly
+  one** live dropdown entry or the script refuses to guess (exit 1).
+- `--partner-id <n>` — the numeric id shown in the dropdown
+  (e.g. `54` = the Khadki account).
+- The target list is fetched **live** from the portal every run
+  (`--level sub` = Sub Distributor, the default; `--level lco` = LCO).
+  No partner ids are ever hard-coded.
+
+## Flags
+
+| Flag | Meaning |
+|---|---|
+| `--account {shreeganesh,reseller}` | source login; keys `username(_shreeganesh)/password(_shreeganesh)` in `.env`. Default `shreeganesh`. |
+| `--level {sub,lco}` | Entity Level for the recipient dropdown (default `sub`). |
+| `--partner-id` / `--partner-name` | (required, pick one) the transfer target. |
+| `--amount` | (required) amount in ₹; must be > 0 and ≤ the live wallet balance. |
+| `--date` | transfer date `dd MMM yyyy`; default = the page's own default (today). |
+| `--remark` | free-text remark recorded in the ledger. |
+| `--payment-received {yes,no}` | portal radio; default `yes` (the page's own default). |
+| `--dry-run` | build everything, submit nothing, touch no gate file. |
+| `--curl` | print a one-shot cURL instead of submitting. |
+| `--force` | skip the `yes/NO` confirmation prompt. |
+| `--bypass-gate` | skip the anti-double-transfer gate — **only after verifying the ledger yourself**. |
+| `--env <path>` | alternate .env location. |
+
+## What it does, step by step
+
+1. Live login as the source account.
+2. Opens the Transfer Balance page; reads the **live wallet balance**
+   (`Current Balance:` label) and the default transfer date.
+3. Async-refreshes the Entity Level / partner dropdown **read-only** and
+   resolves the target (unique match or refuse).
+4. Sanity checks: amount > 0, amount ≤ balance.
+5. Gate: local marker + **same-day ledger check** on Balance Transfer History
+   (a matching `Transfer Balance To` row already on the ledger blocks the run).
+6. Prints the full summary → `yes/NO` prompt (skipped with `--force`).
+7. Writes the *"attempted"* marker to `transfer_gate.json` **before** the POST.
+8. Submits the WebForms POST **exactly once** — no retry after timeout or
+   HTTP error (outcome UNKNOWN → verify the ledger manually; the gate stays
+   closed until resolved).
+9. Verifies on the portal's own **Balance Transfer History** report: a
+   `Transfer Balance To <partner>` debit row dated today with the exact
+   amount (checked up to 4 times, 15 s apart). Only a confirmed match updates
+   the gate to `confirmed` and writes `transfer_log.csv`.
+10. Prints the confirmed ledger row (including the closing wallet balance).
+
+## The anti-double-transfer gate
+
+Same two-layer design as the recharge gate:
+
+1. **Local marker (`transfer_gate.json`)** — the *"attempted"* record is
+   written **before** the POST. Any `attempted`/`unknown` record blocks all
+   re-runs (any partner, any amount) until you resolve it; a *confirmed*
+   record blocks the same partner + amount + day duplicate.
+2. **Live ledger check** — before submitting, Balance Transfer History is
+   queried: a matching `Transfer Balance` row dated today for this
+   partner/amount refuses the run (exit 4).
+
+To re-run deliberately after checking the ledger yourself:
+`--bypass-gate`. Resolving stuck `attempted`/`unknown` entries: delete the
+entry from `transfer_gate.json` (after verifying the report) or use
+`--bypass-gate` once.
+
+## Transfer log (`transfer_log.csv`)
+
+One line per **confirmed transfer**, inserted at the TOP (newest first).
+Only after ledger verification — dry-runs, prompt-aborts, `--curl` and
+unknown/failed outcomes are never logged:
+
+```
+transfer_datetime,from_account,partner_id,partner_name,amount,remark
+```
+
+---
+
 ## Troubleshooting
 
 ### Both scripts
@@ -381,14 +509,18 @@ curl --request POST \
   sliding). There is no explicit logout — nothing persists between runs.
 - Every token (`__VIEWSTATE`, `__EVENTVALIDATION`, CSRF) is parsed fresh per
   run; no captured values are ever reused.
-- Files that contain customer data: `recharge_log.csv` (names), `renew_gate.json`
-  (ids), and any exported `--curl` output (cookies + customer data). Store and
-  share them carefully; the scripts print reminders when creating files.
+- Files that contain customer/partner data: `recharge_log.csv`,
+  `transfer_log.csv` (names), `renew_gate.json` / `transfer_gate.json` (ids),
+  and any exported `--curl` output (cookies + context). Store and share them
+  carefully; the scripts print reminders when creating files.
 - `crm_customers.py` is 100% read-only (renew dialog fetched but never
   submitted). Submitting renewals happens **only** in `auto_renew.py`, behind
   the confirm/gate layers described above.
-- A `.gitignore` is provided — `.env`, `renew_gate.json`, `recharge_log.csv`
-  and research captures never get committed.
+- Submitting wallet transfers happens **only** in `transfer_balance.py`,
+  behind its confirm/gate layers; every investigation step (dropdown
+  refreshes, balance reads, ledger queries) is read-only.
+- A `.gitignore` is provided — `.env`, the gate/log files and research
+  captures never get committed.
 
 ## Related files
 
@@ -396,9 +528,12 @@ curl --request POST \
 |---|---|
 | `crm_customers.py` | Customer data fetcher (read-only). |
 | `auto_renew.py` | Guarded one-shot renewal trigger (Python). |
+| `transfer_balance.py` | Guarded one-shot partner-to-partner wallet transfer (Python). |
 | `.env` | Credentials — local only (format `username :-` / `password :-`). |
 | `auto_renew.ps1` | PowerShell renewal trigger (original; same flow, kept for reference). |
 | `renew_gate.json` | Anti-double-recharge marker file written by `auto_renew.py`. Created automatically; deleting entries weakens the gate — only remove after checking the Recent Purchase/Renew Report. |
 | `recharge_log.csv` | Written by `auto_renew.py` on every confirmed recharge. Limited fields (customer id/name, recharge date, activation date, expiry date), newest-first. Dry-runs/aborts/failures are never logged. Contains customer names — store carefully. |
+| `transfer_gate.json` | Anti-double-transfer marker file written by `transfer_balance.py`. Same handling rules as `renew_gate.json`. |
+| `transfer_log.csv` | Written by `transfer_balance.py` on every ledger-confirmed transfer (datetime, source account, target partner, amount, remark), newest-first. |
 | `RENEWAL_ENDPOINTS.md` | Full documentation of the renewal endpoints and payload. |
 | `AUTOMATION_ASSESSMENT.md` | Safety assessment of automating renewals. |
