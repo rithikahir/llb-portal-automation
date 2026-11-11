@@ -509,7 +509,7 @@ and produces the PDF.
 |---|---|
 | `Invoice Date : - 18-07-26` | today's date, **in the bill's own format** (e.g. `11-11-26`) |
 | `Invoice No : - ST/023/2026-27` | number **+1**, same width & prefix → `ST/024/2026-27` |
-| `Bill Period:-17/07/2026 to 16/01/2027` | both dates **+1 year** → `17/07/2027 to 16/01/2028` (or `--period-shift next` for the immediately following period) |
+| `Bill Period:-17/07/2026 to 16/01/2027` | advanced by the bill's **own duration** in whole calendar months (`auto`, default): 1-month bill → next month, 3-month → 3, 13-month → 13. Alternatives: `next` (day-count), `year` (both dates +1 year) |
 
 Everything else in the document (amounts, GSTIN, buyer address, item rows) is
 untouched — edits are label-anchored (`Invoice No`, `Invoice Date`,
@@ -560,7 +560,7 @@ python update_bills.py --bill-file SKIN_CITY_BILL.docx --period-shift next
 ```
 
 Flags: `--customer`, `--bill-file`, `--invoice-no`, `--new-invoice-no`,
-`--invoice-date`, `--period-shift {year,next}`, `--pdf-dir`, `--bills-dir`,
+`--invoice-date`, `--period-shift {auto,next,year}`, `--pdf-dir`, `--bills-dir`,
 `--dry-run`, and for the server `--serve --host --port`.
 
 ## Apps Script side

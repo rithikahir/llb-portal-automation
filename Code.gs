@@ -14,8 +14,8 @@
  *      ST/001/2027-28, ST/002/2027-28, ...
  *   4. POSTs {customer, bill_file?, new_invoice_no, key} to the local
  *      update_bills.py server, which edits the bill .docx (Invoice Date =
- *      today, Invoice No = the exact number above, Bill Period = next
- *      consecutive period) and creates the PDF.
+ *      today, Invoice No = the exact number above, Bill Period = advanced by
+ *      the bill's OWN duration in months) and creates the PDF.
  *   5. Appends the new record row to "GST RECORDS" (Payment Status =
  *      "Pending", Payment Date/GST PAID empty — fill after collection).
  *   6. Writes "BILLED <invoice no> <date>" into the UPCOMING BILLS row's
@@ -112,7 +112,7 @@ function run_(dry) {
       var rec = {
         customer: name,
         new_invoice_no: invNo,
-        period_shift: 'next',
+        period_shift: 'auto',               // advance by the bill's own duration (1mo -> 1mo, 3mo -> 3mo ...)
         key: key
       };
       if (billFile) rec.bill_file = billFile;

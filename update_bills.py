@@ -12,11 +12,12 @@ What gets updated inside the bill (label-anchored, so nothing else is touched):
   * Invoice No  : - ST/009/2026-27  -> ST/010/2026-27   (number +1, same width)
                                        (or the exact value sent as
                                         "new_invoice_no", used for testing)
-  * Bill Period:-<start> to <end>   -> the NEXT consecutive period of the same
-                                       duration (e.g. 17/07/2026-16/01/2027 ->
-                                       17/01/2027-16/07/2027; for 1-year bills
-                                       this equals +1 year). Alternative:
-                                       --period-shift year.
+  * Bill Period:-<start> to <end>   -> advanced by the bill's OWN duration in
+                                       whole calendar months (default "auto"):
+                                       a 1-month bill moves one month, a
+                                       3-month bill three, a 13-month bill
+                                       thirteen. Alternatives: next (day
+                                       count), year (both dates +1 year).
 
 Outputs:
   * the .docx is saved in place (a backup copy is made first, in
@@ -81,6 +82,8 @@ def log(msg: str) -> None:
 
 
 # ------------------------------------------------------------------ date utils
+import calendar
+
 DATE_FORMATS = [
     ("%d/%m/%Y", r"/"), ("%d-%m-%Y", r"-"), ("%d.%m.%Y", r"\."),
     ("%d/%m/%y", r"/"), ("%d-%m-%y", r"-"), ("%d.%m.%y", r"\."),
@@ -113,10 +116,35 @@ def add_one_year(d: date) -> date:
         return d.replace(year=d.year + 1, day=28)
 
 
+def add_months(d: date, n: int) -> date:
+    """Same day-of-month, n calendar months later (day clamped to month end)."""
+    y = d.year + (d.month - 1 + n) // 12
+    m = (d.month - 1 + n) % 12 + 1
+    last = calendar.monthrange(y, m)[1]
+    return d.replace(year=y, month=m, day=min(d.day, last))
+
+
+def infer_months(start: date, end: date) -> int | None:
+    """Whole number of calendar months the bill period spans, or None when the
+    period is not a whole number of months (then the caller falls back to
+    day-based arithmetic)."""
+    dm = (end.year - start.year) * 12 + (end.month - start.month)
+    for m in (dm, dm + 1, dm - 1):           # e.g. 01/01->31/01 has dm == 0
+        if m and m > 0:
+            if add_months(start, m) - timedelta(days=1) == end or add_months(start, m) == end:
+                return m
+    return None
+
+
 def shift_period(start: date, end: date, mode: str) -> tuple[date, date]:
-    if mode == "year":                       # BOTH dates +1 year (the user's rule)
+    if mode == "year":                       # BOTH dates +1 year
         return add_one_year(start), add_one_year(end)
-    # "next": the immediately following period of the same duration
+    if mode == "auto":                       # DEFAULT: the bill's own duration
+        m = infer_months(start, end)
+        if m:
+            return add_months(start, m), add_months(end, m)
+        # not a whole number of months -> day-based consecutive period
+    # "next": the immediately following period of the same day-count
     duration = (end - start).days + 1
     new_start = end + timedelta(days=1)
     return new_start, new_start + timedelta(days=duration - 1)
@@ -412,7 +440,7 @@ def log_append(row: dict) -> None:
 
 
 # ------------------------------------------------------------------ core update
-def process_record(rec: dict, *, dry_run: bool = False, period_shift: str = "next",
+def process_record(rec: dict, *, dry_run: bool = False, period_shift: str = "auto",
                    bills_dir: Path | None = None, pdf_dir: Path | None = None) -> dict:
     pdf_dir = Path(pdf_dir) if pdf_dir else PDF_DIR
     bills_dir = Path(bills_dir) if bills_dir else BILLS_DIR
@@ -547,10 +575,10 @@ def main() -> int:
     ap.add_argument("--invoice-no", help="CURRENT invoice no from Apps Script, e.g. ST/023/2026-27 (default: read from the bill)")
     ap.add_argument("--new-invoice-no", help="write this EXACT invoice no instead of +1 (testing)")
     ap.add_argument("--invoice-date", help="invoice date to write, e.g. 11-11-26 (default: today, bill's own format)")
-    ap.add_argument("--period-shift", choices=("next", "year"), default="next",
-                    help="next = the immediately following period of the same duration "
-                         "(default; correct for 1/2/6/12-month bills); "
-                         "year = both bill-period dates +1 year")
+    ap.add_argument("--period-shift", choices=("auto", "next", "year"), default="auto",
+                    help="auto = advance by the bill's OWN duration in whole months "
+                         "(1-month bill -> next 1 month, 3-month -> next 3, etc.; default). "
+                         "next = day-count based consecutive period; year = both dates +1 year")
     ap.add_argument("--pdf-dir", help="override PDF output folder (default: Desktop\\gst_bills)")
     ap.add_argument("--bills-dir", help="override bills folder (default: Shreeganesh_Telecom_GST_BILLS next to script)")
     ap.add_argument("--dry-run", action="store_true", help="show what WOULD change; save nothing")
