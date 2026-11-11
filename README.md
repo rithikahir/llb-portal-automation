@@ -41,6 +41,12 @@ from the portal's live responses** on every run — stale values are never reuse
   - [What it does, step by step](#what-it-does-step-by-step-1)
   - [The anti-double-transfer gate](#the-anti-double-transfer-gate)
   - [Transfer log (`transfer_log.csv`)](#transfer-log-transfer_logcsv)
+- [Script 4 — `update_bills.py` (GST bill updater)](#script-4--update_billspy-gst-bill-updater)
+  - [What it updates](#what-it-updates)
+  - [Server mode (for Apps Script)](#server-mode-for-apps-script)
+  - [One-shot CLI mode](#one-shot-cli-mode)
+  - [Apps Script side](#apps-script-side)
+  - [Safety & outputs](#safety--outputs)
 - [Troubleshooting](#troubleshooting)
 - [Sessions & security notes](#sessions--security-notes)
 - [Related files](#related-files)
@@ -487,6 +493,110 @@ unknown/failed outcomes are never logged:
 ```
 transfer_datetime,from_account,partner_id,partner_name,amount,remark
 ```
+
+---
+
+# Script 4 — `update_bills.py` (GST bill updater)
+
+Keeps the bills in `Shreeganesh_Telecom_GST_BILLS\` rolling forward. When
+Google Apps Script picks up a record (a customer + its current invoice no),
+it POSTs it here; the script picks that customer's bill `.docx`, updates it
+and produces the PDF.
+
+## What it updates
+
+| Field | Before → After |
+|---|---|
+| `Invoice Date : - 18-07-26` | today's date, **in the bill's own format** (e.g. `11-11-26`) |
+| `Invoice No : - ST/023/2026-27` | number **+1**, same width & prefix → `ST/024/2026-27` |
+| `Bill Period:-17/07/2026 to 16/01/2027` | both dates **+1 year** → `17/07/2027 to 16/01/2028` (or `--period-shift next` for the immediately following period) |
+
+Everything else in the document (amounts, GSTIN, buyer address, item rows) is
+untouched — edits are label-anchored (`Invoice No`, `Invoice Date`,
+`Bill Period`) so only those values are rewritten. All repeated copies
+(merged cells) are updated too.
+
+## Server mode (for Apps Script)
+
+```powershell
+python update_bills.py
+# listening on http://0.0.0.0:8765  (POST /update, GET /health)
+```
+
+Payload (JSON):
+
+```json
+{
+  "customer": "SKIN CITY",          // matches SKIN_CITY_BILL.docx (fuzzy, unique)
+  "invoice_no": "ST/023/2026-27",   // CURRENT invoice no from the tracker; the script writes +1
+  "key": "row-123",                 // unique id from Apps Script — strongly recommended
+  "bill_file": "optional.docx",     // or pick the file directly
+  "new_invoice_no": "ST/024/2026-27", // optional: write this exact no (testing)
+  "invoice_date": "11-11-26",       // optional: override the date
+  "period_shift": "year"            // optional: "year" (default) or "next"
+}
+```
+
+Response (JSON): `{ok, bill, old/new_invoice_no, invoice_date,
+old/new_bill_period, backup, pdf, pdf_created, ...}`. Errors return
+`{ok: false, error}` with HTTP 500/400.
+
+**Idempotency:** the same `key` POSTed twice never edits twice — the second
+call answers from cache with `duplicate: true`. This protects against
+Apps Script retrying a timed-out request (which would otherwise bump the
+invoice number and shift the period twice).
+
+## One-shot CLI mode
+
+```powershell
+# preview (changes nothing)
+python update_bills.py --customer "SKIN CITY" --invoice-no "ST/023/2026-27" --dry-run
+
+# real run: updates the docx in place + writes Desktop\gst_bills\SKIN_CITY_BILL.pdf
+python update_bills.py --customer "SKIN CITY" --invoice-no "ST/023/2026-27"
+
+# pick the file directly, shift the period to the consecutive one
+python update_bills.py --bill-file SKIN_CITY_BILL.docx --period-shift next
+```
+
+Flags: `--customer`, `--bill-file`, `--invoice-no`, `--new-invoice-no`,
+`--invoice-date`, `--period-shift {year,next}`, `--pdf-dir`, `--bills-dir`,
+`--dry-run`, and for the server `--serve --host --port`.
+
+## Apps Script side
+
+```javascript
+function updateGstBill(rec) {
+  var res = UrlFetchApp.fetch('http://YOUR_PC_IP:8765/update', {
+    method: 'post',
+    contentType: 'application/json',
+    payload: JSON.stringify({
+      customer:   rec.customerName,   // e.g. 'SKIN CITY'
+      invoice_no: rec.invoiceNo,      // current 'ST/023/2026-27'
+      key:        rec.rowId           // unique per record — enables dedupe
+    }),
+    muteHttpExceptions: true
+  });
+  Logger.log(res.getContentText());
+}
+```
+
+Reachability: Apps Script runs on Google's servers, so `YOUR_PC_IP` must be
+publicly reachable — use a tunnel (ngrok / cloudflared → e.g.
+`https://xxx.ngrok.app`) and allow Python through the Windows firewall when
+prompted. On a plain LAN URL Apps Script cannot reach the machine directly.
+
+## Safety & outputs
+
+- The `.docx` is **backed up first** into `Shreeganesh_Telecom_GST_BILLS_backup\<name>_<timestamp>.docx`,
+  then rewritten in place.
+- PDF → `Desktop\gst_bills\<bill name>.pdf` (LibreOffice headless; MS Word via
+  COM as fallback). If PDF conversion fails, the docx update still stands and
+  the response carries `pdf_error`.
+- `bills_update_log.csv` — one line per successful update (old→new invoice no,
+  periods, pdf path, key). `bills_state.json` — the idempotency cache.
+  Both are gitignored.
+- Windows quirk: run as `python update_bills.py ...`, never `.\update_bills.py`.
 
 ---
 

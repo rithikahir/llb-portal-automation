@@ -7,6 +7,11 @@ transfer_log.csv
 
 # business documents (GST bills)
 Shreeganesh_Telecom_GST_BILLS/
+Shreeganesh_Telecom_GST_BILLS_backup/
+
+# bill updater runtime data (customer/business names)
+bills_update_log.csv
+bills_state.json
 
 # python build artefacts
 __pycache__/
