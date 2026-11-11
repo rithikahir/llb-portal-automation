@@ -373,8 +373,17 @@ def norm_name(s: str) -> str:
     return re.sub(r"\s+", "_", s).strip("_")
 
 
+STOPWORDS_FILE_MATCH = {"PVT", "LTD", "LLP", "PRIVATE", "LIMITED", "CO", "INC", "PC",
+                        "THE", "AND", "SOLUTIONS", "ENTERPRISES", "INDIA", "STORES", "COMPANY"}
+
+
 def _tokens(s: str) -> list[str]:
-    return [t for t in re.sub(r"[^A-Za-z0-9]+", " ", (s or "").upper()).split() if t]
+    """Meaningful tokens for file matching: drop corporate suffixes and
+    anything shorter than 3 chars (single letters otherwise match ANY file
+    containing that letter and destroy the score)."""
+    toks = [t for t in re.sub(r"[^A-Za-z0-9]+", " ", (s or "").upper()).split() if t]
+    return [t for t in toks
+            if (len(t) >= 3 or t.isdigit()) and t not in STOPWORDS_FILE_MATCH]
 
 
 def resolve_bill(bills_dir: Path, customer: str | None, bill_file: str | None) -> Path:
