@@ -466,6 +466,13 @@ def process_record(rec: dict, *, dry_run: bool = False, period_shift: str = "aut
         raise ValueError(f"could not find 'Invoice No' in {bill.name} (template changed?)")
 
     old_inv = old["invoice_no"]
+    expect = str(rec.get("expect_invoice_no") or "").strip()
+    if expect and old_inv != expect:
+        raise ValueError(
+            f"bill already shows invoice no {old_inv} but the sheet expected {expect} — "
+            f"refusing to update again (double-bill guard). If this update is intentional, "
+            f"clear bills_state.json or check the sheet's GST RECORDS.")
+
     new_inv = str(rec["new_invoice_no"]).strip() if rec.get("new_invoice_no") else bump_invoice(
         str(rec.get("invoice_no") or old_inv))
 

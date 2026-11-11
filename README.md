@@ -613,14 +613,18 @@ calls it; nothing on Google's side runs by itself (no trigger, no tunnel).
 What it does when called:
 
 - **`get_due`** — returns every `UPCOMING BILLS` row whose Expire Date is on
-  or before a cutoff sent by Python (default: yesterday; the run also marks
-  those rows `PROCESSING` so two overlapping runs can never double-bill).
+  or before a cutoff sent by Python (default: yesterday). It reads the
+  optional `Bill File` column but **never writes anything to the sheet** in
+  this step.
 - **`complete`** — after Python has edited the bills, this appends the new
   rows to `GST RECORDS` (copying GSTIN / description / amounts / payment
   mode from the customer's **last** invoice, fuzzy name match; `Payment
   Status` = Pending) **only if that invoice number is not already there**
-  (crash-safe), and marks `Bill Status` `BILLED <no> <date>` or
-  `ERROR <date>: <msg>` (fixable — clear the cell and re-run with `--resume`).
+  (crash-safe), then **advances that customer's Expire Date to the new
+  period end** and **re-sorts UPCOMING BILLS by Expire Date** (nearest
+  first). Nothing is written to the `Bill File` / `Bill Status` columns;
+  failed customers keep their old Expire Date and are simply retried by the
+  next run.
 
 Invoice numbers are **global**: `ST/046/2026-27 -> ST/047/2026-27`,
 restarting at `ST/001/2027-28` after each 31 March. Python writes the exact
@@ -651,8 +655,8 @@ python run_billing.py              # the real run
 ```
 you run run_billing.py (PC)
         │  1. POST get_due  ──────────────►  Apps Script Web App
-        │                                    reads UPCOMING BILLS, marks due
-        │                                    rows PROCESSING, returns them
+        │                                    reads UPCOMING BILLS, returns
+        │                                    the due rows (read-only)
         │         ◄──── list of due bills ──┘
         │  2. for each bill (all on YOUR PC):
         │        pick the .docx (fuzzy or 'Bill File' column)
@@ -660,7 +664,8 @@ you run run_billing.py (PC)
         │        docx saved in place → PDF via LibreOffice
         │  3. POST complete ──────────────►  Apps Script Web App
         │                                    appends GST RECORDS rows,
-        ◄──────────────────────────────────► marks BILLED / ERROR
+        ◄──────────────────────────────────► advances Expire Dates,
+                                             re-sorts UPCOMING BILLS
 ```
 
 No tunnel and no always-on server are needed — the connection lives only for
@@ -695,21 +700,23 @@ running.
 python run_billing.py                    # bills everything that expired yesterday or earlier
 python run_billing.py --include-today    # also rows that expire today
 python run_billing.py --days 7           # everything that expired in the last week
-python run_billing.py --resume           # finish rows stuck in PROCESSING (after a crash)
 python run_billing.py --dry-run          # preview only
 ```
 
 Exit codes: `0` all good, `2` config/connection problem, `3` some bills
-failed (they're marked `ERROR` in Bill Status; fix, clear the cell, re-run
-with `--resume`). Re-runs are safe: Python's `bills_state.json` dedupes by
-key and Apps Script only appends a GST row when the invoice number is not
-already in the sheet.
+failed (nothing was changed for those customers in the sheet — they stay
+due and are retried automatically on the next run). Re-runs are safe:
+Python's `bills_state.json` dedupes by key, Apps Script only appends a GST
+row when the invoice number is not already in the sheet, and Python refuses
+to edit a bill whose current invoice number doesn't match the sheet
+(double-bill guard).
 
 ## What you see in the sheet
 
-- `UPCOMING BILLS` gains **Bill Status**: `PROCESSING` (run in progress /
-  crashed — clear it or use `--resume`), `BILLED ST/047/2026-27 on 11/11/26`,
-  or `ERROR ...` (retriable).
+- `UPCOMING BILLS`: a billed customer's **Expire Date moves forward** to the
+  new period end, and the tab stays **sorted by Expire Date, nearest first**.
+  The `Bill File` / `Bill Status` columns are never written by the
+  automation (Bill File is only read if you create and fill it yourself).
 - `GST RECORDS` gains the new invoice rows with `Payment Status` = Pending —
   fill Payment Date / GST PAID after collection.
 - PDFs land in the `pdf_dir` folder from `.env` (`Desktop\gst_bills` by

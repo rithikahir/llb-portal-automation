@@ -8,18 +8,19 @@ You run this by hand whenever you want to bill. It:
   2. calls the Apps Script Web App (action "get_due") which returns every
      UPCOMING BILLS row whose Expire Date is YESTERDAY OR EARLIER
      (default; --days N goes further back, --include-today adds today).
-     Rows it returns are immediately marked PROCESSING in the sheet so a
-     double-run can never bill them twice.
   3. for each due customer it edits the bill .docx in place (Invoice Date =
      today, Invoice No = the exact number Apps Script computed, Bill Period
      advanced by the bill's own duration) and writes the PDF to the folder
      in .env "pdf_dir" (default: Desktop\\gst_bills).
   4. calls Apps Script again (action "complete") which appends the GST
-     RECORDS row and marks Bill Status BILLED / ERROR.
+     RECORDS row, moves the customer's Expire Date forward to the new
+     period end and re-sorts UPCOMING BILLS by Expire Date (nearest first).
+     Nothing is ever written to the Bill File / Bill Status columns.
 
 Idempotent end-to-end: the same run can be re-executed safely. Python's
-bills_state.json dedupes by key, and Apps Script only appends a GST row when
-that invoice number is not already in GST RECORDS.
+bills_state.json dedupes by key, Apps Script only appends a GST row when
+that invoice number is not already in GST RECORDS, and Python refuses to
+edit a bill whose invoice number doesn't match what the sheet expected.
 
 Setup (one time):
   * Deploy Code.gs as a Web App (Deploy > New deployment > Web app;
@@ -82,8 +83,6 @@ def main() -> int:
                          "(default 1 = yesterday and before)")
     ap.add_argument("--include-today", action="store_true",
                     help="also include rows that expire TODAY")
-    ap.add_argument("--resume", action="store_true",
-                    help="also pick up rows stuck in PROCESSING (e.g. after a crashed run)")
     ap.add_argument("--period-shift", choices=("auto", "next", "year"), default="auto",
                     help="auto = advance by the bill's own duration (default)")
     ap.add_argument("--pdf-dir", help="override PDF output folder (default: .env pdf_dir)")
@@ -110,8 +109,7 @@ def main() -> int:
     # ---- 1. ask the sheet who is due --------------------------------------
     print(f"Asking Apps Script for UPCOMING BILLS with Expire Date <= {cutoff:%d/%m/%y} ...")
     resp = call_apps_script(url, {"action": "get_due", "secret": secret,
-                                  "cutoff": f"{cutoff:%d/%m/%y}",
-                                  "resume": args.resume, "dry": args.dry_run})
+                                  "cutoff": f"{cutoff:%d/%m/%y}", "dry": args.dry_run})
     if not resp.get("ok"):
         print(f"ERROR from Apps Script: {resp.get('error')}", file=sys.stderr)
         return 2
@@ -120,7 +118,6 @@ def main() -> int:
         print("Nothing is due. Nothing to do.")
         return 0
     print(f"{len(due)} bill(s) due"
-          + (f" ({resp.get('claimed')} newly claimed)" if resp.get("claimed") else "")
           + ("" if not args.dry_run else "  [DRY RUN — nothing will be edited]"))
     for item in due:
         last = item.get("last_invoice_no")
@@ -134,6 +131,8 @@ def main() -> int:
                "key": item["key"]}
         if item.get("bill_file"):
             rec["bill_file"] = item["bill_file"]
+        if item.get("last_invoice_no"):
+            rec["expect_invoice_no"] = item["last_invoice_no"]   # double-bill guard
         try:
             res = U.process_record(rec, dry_run=args.dry_run, period_shift=args.period_shift,
                                    bills_dir=bills_dir, pdf_dir=pdf_dir)
@@ -145,6 +144,7 @@ def main() -> int:
             results.append({"key": item["key"], "ok": True, "duplicate": dup,
                             "new_invoice_no": res["new_invoice_no"],
                             "invoice_date": res["invoice_date"],
+                            "new_expire": str(res["new_bill_period"]).split(" to ")[-1],
                             "pdf_error": res.get("pdf_error")})
         except Exception as exc:
             failed += 1
@@ -160,18 +160,18 @@ def main() -> int:
     resp2 = call_apps_script(url, {"action": "complete", "secret": secret, "results": results})
     if not resp2.get("ok"):
         print(f"ERROR while updating the sheet: {resp2.get('error')}\n"
-              f"Your bills WERE edited and PDFs created; re-run this same command with "
-              f"--resume to finish updating the sheet.",
+              f"Your bills WERE edited and PDFs created; run this same command again to "
+              f"finish updating the sheet (it is safe to re-run).",
               file=sys.stderr)
         return 3
     for line in resp2.get("log", []):
         print("  sheet: " + line)
 
     if failed:
-        print(f"Done with {failed} error(s) — the failed rows are marked ERROR in "
-              f"'Bill Status'; fix the cause, clear the cell, re-run with --resume.")
+        print(f"Done with {failed} error(s) — those customers were NOT changed in the sheet "
+              f"and will be retried automatically on the next run.")
         return 3
-    print("Done: GST RECORDS updated, Bill Status marked, PDFs in " + str(pdf_dir))
+    print("Done: GST RECORDS updated, Expire Dates advanced + tab sorted, PDFs in " + str(pdf_dir))
     return 0
 
 
