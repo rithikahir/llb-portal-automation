@@ -543,7 +543,7 @@ Payload (JSON):
 ```
 
 Response (JSON): `{ok, bill, old/new_invoice_no, invoice_date,
-old/new_bill_period, backup, pdf, pdf_created, ...}`. Errors return
+old/new_bill_period, pdf, pdf_created, ...}`. Errors return
 `{ok: false, error}` with HTTP 500/400.
 
 **Idempotency:** the same `key` POSTed twice never edits twice — the second
@@ -593,8 +593,9 @@ prompted. On a plain LAN URL Apps Script cannot reach the machine directly.
 
 ## Safety & outputs
 
-- The `.docx` is **backed up first** into `Shreeganesh_Telecom_GST_BILLS_backup\<name>_<timestamp>.docx`,
-  then rewritten in place.
+- The `.docx` is rewritten **in place** — no backup copies are kept (the
+  docx write itself is atomic: the file is assembled as a temp file and
+  swapped in only when complete).
 - PDF → `Desktop\gst_bills\<bill name>.pdf` (LibreOffice headless; MS Word via
   COM as fallback). If PDF conversion fails, the docx update still stands and
   the response carries `pdf_error`.
@@ -656,7 +657,7 @@ you run run_billing.py (PC)
         │  2. for each bill (all on YOUR PC):
         │        pick the .docx (fuzzy or 'Bill File' column)
         │        rewrite Invoice Date / Invoice No / Bill Period
-        │        backup → docx saved in place → PDF via LibreOffice
+        │        docx saved in place → PDF via LibreOffice
         │  3. POST complete ──────────────►  Apps Script Web App
         │                                    appends GST RECORDS rows,
         ◄──────────────────────────────────► marks BILLED / ERROR
@@ -712,7 +713,7 @@ already in the sheet.
 - `GST RECORDS` gains the new invoice rows with `Payment Status` = Pending —
   fill Payment Date / GST PAID after collection.
 - PDFs land in the `pdf_dir` folder from `.env` (`Desktop\gst_bills` by
-  default); every edited docx is backed up in `Shreeganesh_Telecom_GST_BILLS_backup\`.
+  default). Every edited docx is updated **in place** — no backups are kept.
 
 ---
 

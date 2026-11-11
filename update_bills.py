@@ -20,8 +20,7 @@ What gets updated inside the bill (label-anchored, so nothing else is touched):
                                        count), year (both dates +1 year).
 
 Outputs:
-  * the .docx is saved in place (a backup copy is made first, in
-    Shreeganesh_Telecom_GST_BILLS_backup/)
+  * the .docx is saved in place (no backup copies are kept)
   * a PDF is written to the Desktop folder  Desktop\\gst_bills\\<bill>.pdf
 
 Two ways to run:
@@ -58,7 +57,6 @@ from lxml import etree
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 BILLS_DIR = SCRIPT_DIR / "Shreeganesh_Telecom_GST_BILLS"
-BACKUP_DIR = SCRIPT_DIR / "Shreeganesh_Telecom_GST_BILLS_backup"
 PDF_DIR = Path.home() / "Desktop" / "gst_bills"
 LOG_FILE = SCRIPT_DIR / "bills_update_log.csv"
 STATE_FILE = SCRIPT_DIR / "bills_state.json"      # idempotency cache: key -> last response
@@ -495,13 +493,6 @@ def process_record(rec: dict, *, dry_run: bool = False, period_shift: str = "aut
         result.update(status="dry-run", note="nothing was saved (dry-run)")
         return result
 
-    # backup, then rewrite the docx in place
-    BACKUP_DIR.mkdir(parents=True, exist_ok=True)
-    stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    bill_bak = BACKUP_DIR / f"{bill.stem}_{stamp}{bill.suffix}"
-    bill_bak.write_bytes(bill.read_bytes())
-    result["backup"] = str(bill_bak)
-
     update_docx(bill, new_inv, inv_date, (ns.strftime(pfmt), ne.strftime(pfmt)))
 
     pdf_dir.mkdir(parents=True, exist_ok=True)
@@ -594,9 +585,8 @@ def main() -> int:
     args = ap.parse_args()
 
     if args.bills_dir:
-        global BILLS_DIR, BACKUP_DIR
+        global BILLS_DIR
         BILLS_DIR = Path(args.bills_dir)
-        BACKUP_DIR = BILLS_DIR.parent / (BILLS_DIR.name + "_backup")
 
     one_shot = args.customer or args.bill_file
     if not one_shot and not args.serve:
