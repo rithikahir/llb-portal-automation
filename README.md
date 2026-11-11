@@ -598,6 +598,33 @@ prompted. On a plain LAN URL Apps Script cannot reach the machine directly.
   Both are gitignored.
 - Windows quirk: run as `python update_bills.py ...`, never `.\update_bills.py`.
 
+## Google Sheet integration (`Code.gs`)
+
+`Code.gs` (in this repo) is pasted into Extensions > Apps Script of the
+"Copy of GST_BILL_RECORDS" sheet. It runs daily via a time-driven trigger:
+
+1. reads `UPCOMING BILLS` (due = Expire Date on/before today, Bill Status empty),
+2. finds the customer's **last** invoice in `GST RECORDS` (fuzzy name match)
+   to copy GSTIN / description / amounts / payment mode,
+3. computes the next **global** invoice no: `ST/046/2026-27 -> ST/047/2026-27`,
+   restarting at `ST/001/2027-28` after each 31 March,
+4. POSTs `{customer, bill_file?, new_invoice_no, key}` to this Python server
+   (which writes that exact number into the bill — no local +1),
+5. appends the new record to `GST RECORDS` (`Payment Status` = Pending),
+6. marks the row `BILLED <no> <date>` in the new **Bill Status** column
+   (col F) so it never runs twice; failures are marked `ERROR ...` and can be
+   fixed + cleared manually.
+
+Test first with `dryRunOnce()` (logs only), then run `processDueBills()` and
+add the trigger. `BILLS_API` inside `Code.gs` points at
+`http://127.0.0.1:8765/update`; if Apps Script must reach the PC from
+Google's cloud, replace it with a tunnel URL (ngrok/cloudflared). The sheet
+ID is a constant in `Code.gs` — **nothing from the sheet goes into `.env`**.
+
+Optional helper column: `Bill File` (col E of UPCOMING BILLS) — exact docx
+name for customers whose name doesn't uniquely map to a file (e.g. the Skin
+City variants, Spes Manning vs Router, Mufatlal, Station HQ, Airan 1/2).
+
 ---
 
 ## Troubleshooting

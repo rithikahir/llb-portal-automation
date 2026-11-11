@@ -12,8 +12,11 @@ What gets updated inside the bill (label-anchored, so nothing else is touched):
   * Invoice No  : - ST/009/2026-27  -> ST/010/2026-27   (number +1, same width)
                                        (or the exact value sent as
                                         "new_invoice_no", used for testing)
-  * Bill Period:-<start> to <end>   -> shifted period (default: BOTH dates
-                                       +1 year; alternative: --period-shift next)
+  * Bill Period:-<start> to <end>   -> the NEXT consecutive period of the same
+                                       duration (e.g. 17/07/2026-16/01/2027 ->
+                                       17/01/2027-16/07/2027; for 1-year bills
+                                       this equals +1 year). Alternative:
+                                       --period-shift year.
 
 Outputs:
   * the .docx is saved in place (a backup copy is made first, in
@@ -342,6 +345,10 @@ def norm_name(s: str) -> str:
     return re.sub(r"\s+", "_", s).strip("_")
 
 
+def _tokens(s: str) -> list[str]:
+    return [t for t in re.sub(r"[^A-Za-z0-9]+", " ", (s or "").upper()).split() if t]
+
+
 def resolve_bill(bills_dir: Path, customer: str | None, bill_file: str | None) -> Path:
     if bill_file:
         p = bills_dir / bill_file
@@ -351,6 +358,7 @@ def resolve_bill(bills_dir: Path, customer: str | None, bill_file: str | None) -
     if not customer:
         raise ValueError("record needs 'customer' (or 'bill_file')")
     n = norm_name(customer)
+    toks = _tokens(customer)
     files = {p.stem.upper(): p for p in bills_dir.glob("*.docx") if not p.name.startswith("~$")}
     # 1) exact "<NAME>_BILL"  2) stem starts with name  3) stem contains name
     for cand in (f"{n}_BILL", n):
@@ -362,9 +370,22 @@ def resolve_bill(bills_dir: Path, customer: str | None, bill_file: str | None) -
     contains = [p for s, p in files.items() if n in s]
     if len(contains) == 1:
         return contains[0]
+    # 4) token-coverage scoring: fraction of the customer's words that appear
+    #    (as substrings) in the file stem minus its trailing "_BILL"
+    scored = []
+    for stem, p in files.items():
+        core = re.sub(r"[_\-]?BILL$", "", stem)
+        flat = core.replace("_", " ").replace("-", " ")
+        cov = (sum(1 for t in toks if t and t in flat) / len(toks)) if toks else 0.0
+        scored.append((round(cov, 3), stem, p))
+    scored.sort(key=lambda x: (-x[0], x[1]))
+    if scored and scored[0][0] > 0:
+        if len(scored) == 1 or scored[0][0] - scored[1][0] > 0.05:
+            return scored[0][2]
     raise FileNotFoundError(
-        f"no unique bill for customer {customer!r} in {bills_dir.name} "
-        f"(exact={bool(starts or contains)}, candidates={[p.name for p in (starts + contains)][:8]})")
+        f"no unique bill for customer {customer!r} in {bills_dir.name} — add the exact "
+        f"file name to the sheet's 'Bill File' column. Closest: "
+        f"{[(s, c) for c, s, _p in scored[:4]]}")
 
 
 # ------------------------------------------------------------------ persistence
@@ -391,7 +412,7 @@ def log_append(row: dict) -> None:
 
 
 # ------------------------------------------------------------------ core update
-def process_record(rec: dict, *, dry_run: bool = False, period_shift: str = "year",
+def process_record(rec: dict, *, dry_run: bool = False, period_shift: str = "next",
                    bills_dir: Path | None = None, pdf_dir: Path | None = None) -> dict:
     pdf_dir = Path(pdf_dir) if pdf_dir else PDF_DIR
     bills_dir = Path(bills_dir) if bills_dir else BILLS_DIR
@@ -526,8 +547,10 @@ def main() -> int:
     ap.add_argument("--invoice-no", help="CURRENT invoice no from Apps Script, e.g. ST/023/2026-27 (default: read from the bill)")
     ap.add_argument("--new-invoice-no", help="write this EXACT invoice no instead of +1 (testing)")
     ap.add_argument("--invoice-date", help="invoice date to write, e.g. 11-11-26 (default: today, bill's own format)")
-    ap.add_argument("--period-shift", choices=("year", "next"), default="year",
-                    help="year = both bill-period dates +1 year (default); next = the immediately following period")
+    ap.add_argument("--period-shift", choices=("next", "year"), default="next",
+                    help="next = the immediately following period of the same duration "
+                         "(default; correct for 1/2/6/12-month bills); "
+                         "year = both bill-period dates +1 year")
     ap.add_argument("--pdf-dir", help="override PDF output folder (default: Desktop\\gst_bills)")
     ap.add_argument("--bills-dir", help="override bills folder (default: Shreeganesh_Telecom_GST_BILLS next to script)")
     ap.add_argument("--dry-run", action="store_true", help="show what WOULD change; save nothing")
