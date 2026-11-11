@@ -1,52 +1,52 @@
 /**
- * Code.gs — GST bill automation for the "Copy of GST_BILL_RECORDS" sheet.
+ * Code.gs — GST bill automation, LOCAL-ONLY edition (Web App).
  *
- * WHAT IT DOES (run daily by a time-driven trigger):
- *   1. Reads the "UPCOMING BILLS" tab. A row is DUE when its Expire Date is
- *      on/before today (minus GRACE_DAYS) and its "Bill Status" column is
- *      still empty.
- *   2. For each due customer it looks up the customer's LAST invoice in
- *      "GST RECORDS" (fuzzy name match) to copy GSTIN, Service Description,
- *      Amount, CGST, SGST, Total and Payment Mode onto the renewal.
- *   3. Computes the next global invoice number from the last row of
- *      GST RECORDS:  ST/046/2026-27 -> ST/047/2026-27.
- *      After 31 March the fiscal year rolls over and numbering restarts:
- *      ST/001/2027-28, ST/002/2027-28, ...
- *   4. POSTs {customer, bill_file?, new_invoice_no, key} to the local
- *      update_bills.py server, which edits the bill .docx (Invoice Date =
- *      today, Invoice No = the exact number above, Bill Period = advanced by
- *      the bill's OWN duration in months) and creates the PDF.
- *   5. Appends the new record row to "GST RECORDS" (Payment Status =
- *      "Pending", Payment Date/GST PAID empty — fill after collection).
- *   6. Writes "BILLED <invoice no> <date>" into the UPCOMING BILLS row's
- *      Bill Status column so the row is never processed twice.
+ * NEW FLOW (no tunnel, no daily trigger, no server running on the PC):
+ *   You run  python run_billing.py  on the PC whenever you want to bill.
+ *   That script calls THIS web app twice:
  *
- * The Python server dedupes by `key`, so an Apps Script retry can never
- * double-bump the invoice number or shift the bill period twice.
+ *     1. action "get_due"
+ *        Reads UPCOMING BILLS. A row is DUE when Expire Date <= a cutoff
+ *        (sent by Python; default = yesterday) and Bill Status is empty
+ *        (or PROCESSING when --resume). For each due row it:
+ *          - finds the customer's LAST invoice in GST RECORDS (fuzzy match)
+ *            so its GSTIN/description/amounts/payment mode can be copied,
+ *          - computes the next GLOBAL invoice no from the last row
+ *            (ST/046/2026-27 -> ST/047/2026-27; restarts ST/001/2027-28
+ *            after each 31 March),
+ *          - marks the row PROCESSING so two runs can never overlap,
+ *          - returns the list to Python.
  *
- * SETUP (one time):
- *   Extensions > Apps Script -> paste this file -> Save.
- *   1. Run dryRunOnce() first (authorize when asked) — it only LOGS what it
- *      would do, touching nothing.
- *   2. Run processDueBills() once for real (or wait for the trigger).
- *   3. Triggers > Add Trigger: function processDueBills / time-driven /
- *      Day timer (e.g. 9am–10am). The PC running update_bills.py must be ON.
+ *     2. action "complete"
+ *        Python edited the .docx files and made the PDFs, then sends back
+ *        per-row results. For each success this app appends the new row to
+ *        GST RECORDS (Payment Status "Pending", date as text) — ONLY if
+ *        that invoice number is not already there (crash-safe) — and marks
+ *        Bill Status "BILLED <no> <date>". Errors are marked "ERROR ...".
  *
- * THE PC SIDE: python update_bills.py  (listens on port 8765). If Apps Script
- * runs from Google's cloud, BILLS_API must be a publicly reachable URL
- * (ngrok / cloudflared tunnel); plain LAN IPs are NOT reachable from Apps
- * Script. If it fails, the row is left unbilled and retried next run.
+ * ONE-TIME SETUP:
+ *   1. Put your secret here:  SECRET = '<value of appscript_secret in .env>'
+ *   2. Deploy > New deployment > type: Web app
+ *        Execute as: Me       Who has access: Anyone
+ *      Copy the Web App URL (ends in /exec) into .env:
+ *        appscript_url :- https://script.google.com/macros/s/.../exec
+ *   3. In the editor run dryRunOnce() (authorize when asked) — preview only.
+ *   4. On the PC:  python run_billing.py --dry-run   then without --dry-run.
+ *
+ * NOTE: after editing this code you must create a NEW DEPLOYMENT VERSION
+ *       (Deploy > Manage deployments > Edit > Version: New) or the old
+ *       code keeps running.
  */
 
 var SHEET_ID = '1taT1_t4GITmjndE8K9ZXDrrLh9BZGD3Os-AAgniZcAM';
-var BILLS_API = 'http://127.0.0.1:8765/update';   // change to your ngrok URL if remote
+var SECRET = 'CHANGE_ME_TO_THE_.env_VALUE';
 var UPCOMING_SHEET = 'UPCOMING BILLS';
 var GST_SHEET = 'GST RECORDS';
 
-var COL_BILL_FILE = 'Bill File';    // UPCOMING BILLS col E (optional): exact docx name
-var COL_STATUS = 'Bill Status';     // UPCOMING BILLS col F: filled by this script
-var GRACE_DAYS = 0;                 // bill this many days BEFORE the expire date (0 = on the day)
-var PREFIX = 'ST';                  // invoice prefix
+var COL_BILL_FILE = 'Bill File';     // UPCOMING BILLS: optional exact docx name
+var COL_STATUS = 'Bill Status';      // UPCOMING BILLS: PROCESSING/BILLED/ERROR
+var TAG_PROCESSING = 'PROCESSING';
+var PREFIX = 'ST';                   // invoice prefix
 
 var INVOICE_RE = /^ST\/(\d+)\/(\d{4})-(\d{1,2})$/;
 var GST_COLUMNS = ['Invoice No', 'Invoice Date', 'Customer Name', 'Customer GSTIN',
@@ -55,29 +55,53 @@ var GST_COLUMNS = ['Invoice No', 'Invoice Date', 'Customer Name', 'Customer GSTI
 var STOPWORDS = ['PVT', 'LTD', 'LLP', 'PRIVATE', 'LIMITED', 'CO', 'THE', 'AND',
   'BILL', 'SOLUTIONS', 'ENTERPRISES', 'INDIA', 'STORES'];
 
-/** Trigger entry point. */
-function processDueBills() {
-  var lock = LockService.getScriptLock();
-  if (!lock.tryLock(30000)) { log_('another run is already in progress'); return; }
+/** Web app entry point. Python POSTs JSON {action, secret, ...}. */
+function doPost(e) {
+  var body;
   try {
-    run_(false);
-  } finally {
-    lock.releaseLock();
+    body = JSON.parse((e && e.postData && e.postData.contents) || '{}');
+  } catch (err) {
+    return jsonOut_({ ok: false, error: 'bad JSON body' });
+  }
+  if (String(body.secret || '') !== SECRET)
+    return jsonOut_({ ok: false, error: 'bad or missing secret' });
+  try {
+    if (body.action === 'get_due') return jsonOut_(getDue_(body));
+    if (body.action === 'complete') return jsonOut_(complete_(body));
+    return jsonOut_({ ok: false, error: 'unknown action: ' + body.action });
+  } catch (err) {
+    return jsonOut_({ ok: false, error: String(err && err.message || err) });
   }
 }
 
-/** Safe test: logs every decision, sends NOTHING, writes NOTHING. */
-function dryRunOnce() {
-  run_(true);
+/** Browser test that the web app is alive. */
+function doGet() {
+  return jsonOut_({ ok: true, service: 'gst-bill-automation',
+                    actions: ['get_due', 'complete'] });
 }
 
-function run_(dry) {
+/** Editor-only preview: logs exactly what get_due would return (marks nothing). */
+function dryRunOnce() {
+  var r = getDue_({ dry: true, resume: true, secret: SECRET });
+  Logger.log('cutoff: ' + r.cutoff + '   due: ' + r.due.length);
+  r.due.forEach(function (d) {
+    Logger.log('  ' + d.customer + ' | expires ' + d.expire +
+      ' | next ' + d.new_invoice_no + ' | last ' + (d.last_invoice_no || 'NONE') +
+      ' | bill_file ' + (d.bill_file || '(auto)'));
+  });
+  return r;
+}
+
+/* -------------------------------------------------------------- action 1 */
+
+function getDue_(body) {
   var ss = SpreadsheetApp.openById(SHEET_ID);
   var up = ss.getSheetByName(UPCOMING_SHEET);
   var gst = ss.getSheetByName(GST_SHEET);
-  if (!up || !gst) throw new Error('tabs ' + UPCOMING_SHEET + ' / ' + GST_SHEET + ' not found');
+  if (!up || !gst) throw new Error('tabs "' + UPCOMING_SHEET + '" / "' + GST_SHEET + '" not found');
 
   var today = startOfDay_(new Date());
+  var cutoff = asDate_(body.cutoff) || addDays_(today, -1);
   var upVals = up.getDataRange().getValues();
   var upHeader = upVals[0];
   var iName = colOf_(upHeader, 'Customer name');
@@ -87,93 +111,102 @@ function run_(dry) {
   var iStatus = ensureColumn_(up, COL_STATUS);
 
   var gstVals = gst.getDataRange().getValues();
-  var gstHeader = gstVals[0];
-  var gCols = {};
-  GST_COLUMNS.forEach(function (c) { gCols[c] = colOf_(gstHeader, c); });
-
-  var results = [];
+  var due = [], claim = [];
   for (var r = 1; r < upVals.length; r++) {
-    var row = upVals[r];
-    var name = String(row[iName] || '').trim();
-    var expireRaw = row[iExp];
-    var expire = asDate_(expireRaw);
-    var status = String(row[iStatus] || '').trim();
-    if (!name || !expire) continue;                       // empty row
-    if (status) continue;                                 // already handled
+    var name = String(upVals[r][iName] || '').trim();
+    var expire = asDate_(upVals[r][iExp]);
+    if (!name || !expire) continue;
+    if (expire > cutoff) continue;
+    var status = String(upVals[r][iStatus] || '').trim();
+    var isFree = status === '';
+    var isProcessing = status.indexOf(TAG_PROCESSING) === 0;
+    if (isFree) claim.push(r);
+    else if (!isProcessing || !body.resume) continue;   // BILLED/ERROR stays untouched
 
-    var due = addDays_(expire, -GRACE_DAYS) <= today;
-    if (!due) { results.push(name + ': not due (expires ' + fmt_(expire) + ')'); continue; }
-
-    var billFile = String(row[iFile] || '').trim() || null;
-    try {
-      var lastRec = findLastGstRecord_(gstVals, name);    // may be null
-      var invNo = nextInvoiceNo_(gstVals, today);
-      var key = 'up_r' + (r + 1) + '_' + fmt_(expire);
-      var rec = {
-        customer: name,
-        new_invoice_no: invNo,
-        period_shift: 'auto',               // advance by the bill's own duration (1mo -> 1mo, 3mo -> 3mo ...)
-        key: key
-      };
-      if (billFile) rec.bill_file = billFile;
-      if (lastRec && lastRec.invoiceNo) rec.invoice_no = lastRec.invoiceNo;
-
-      if (dry) {
-        results.push('[dry-run] ' + name + ' -> would bill ' + invNo +
-          (lastRec ? ' (copying ' + lastRec.invoiceNo + ')' : ' (WARNING: no GST record match — row would be left for manual fill)'));
-        continue;
-      }
-
-      var resp = callPython_(rec);
-      if (!resp.ok) throw new Error(resp.error || 'python returned ok=false');
-      if (resp.new_invoice_no && resp.new_invoice_no !== invNo)
-        throw new Error('python wrote ' + resp.new_invoice_no + ' but sheet says ' + invNo);
-
-      if (resp.duplicate) {
-        // python already made this bill (retry) — do NOT append a second record
-        setStatus_(up, r, iStatus, 'BILLED ' + invNo + ' on ' + fmt_(today) + ' (dedup)');
-        results.push(name + ': python reports duplicate for ' + invNo + ' — status marked, no new record');
-        continue;
-      }
-
-      if (!lastRec) throw new Error('no matching GST RECORDS row for ' + name + ' — record NOT added, fill manually');
-
-      appendGstRecord_(gst, gCols, {
-        invoiceNo: invNo,
-        invoiceDate: String(resp.invoice_date || '').replace(/-/g, '/'),
-        customer: lastRec.customer,                        // sheet's own spelling
-        gstin: lastRec.gstin, desc: lastRec.desc,
-        amount: lastRec.amount, cgst: lastRec.cgst, sgst: lastRec.sgst, total: lastRec.total,
-        mode: lastRec.mode
-      });
-      setStatus_(up, r, iStatus, 'BILLED ' + invNo + ' on ' + fmt_(today));
-      results.push(name + ': BILLED ' + invNo + ' (was ' + lastRec.invoiceNo + ')');
-      // keep local numbering in sync for further rows in this run
-      lastInvoiceCache_ = { num: parseInt(invNo.match(INVOICE_RE)[1], 10), fy: fyOf_(today) };
-    } catch (e) {
-      results.push('ERROR ' + name + ': ' + e.message);
-      if (!dry) setStatus_(up, r, iStatus, 'ERROR ' + fmt_(today) + ': ' + String(e.message).slice(0, 100));
-    }
+    var last = findLastGstRecord_(gstVals, name);
+    due.push({
+      key: 'up_r' + (r + 1) + '_' + fmt_(expire),
+      row: r + 1,
+      customer: name,
+      expire: fmt_(expire),
+      bill_file: String(upVals[r][iFile] || '').trim(),
+      status: status,
+      new_invoice_no: nextInvoiceNo_(gstVals, today),
+      last_invoice_no: last ? last.invoiceNo : null,
+      has_gst_record: !!last
+    });
   }
-  log_('--- run summary ---\n' + results.join('\n'));
-  if (!dry) ss.toast(results.join('\n').slice(0, 250), 'Bill run', 10);
+
+  if (!body.dry && claim.length) {
+    claim.forEach(function (r) {
+      up.getRange(r + 1, iStatus + 1).setValue(TAG_PROCESSING + ' ' + fmt_(today));
+    });
+    SpreadsheetApp.flush();
+  }
+  return { ok: true, dry: !!body.dry, cutoff: fmt_(cutoff), claimed: claim.length, due: due };
 }
 
-/* ------------------------------------------------------------------ python */
+/* -------------------------------------------------------------- action 2 */
 
-function callPython_(rec) {
-  var resp = UrlFetchApp.fetch(BILLS_API, {
-    method: 'post',
-    contentType: 'application/json',
-    payload: JSON.stringify(rec),
-    muteHttpExceptions: true
-  });
-  var code = resp.getResponseCode();
-  var body = resp.getContentText() || '{}';
-  var parsed;
-  try { parsed = JSON.parse(body); } catch (e) { parsed = { ok: false, error: 'non-JSON: ' + body.slice(0, 120) }; }
-  if (code !== 200 && !parsed.ok) parsed = { ok: false, error: 'HTTP ' + code + ': ' + String(parsed.error || body).slice(0, 150) };
-  return parsed;
+function complete_(body) {
+  var ss = SpreadsheetApp.openById(SHEET_ID);
+  var up = ss.getSheetByName(UPCOMING_SHEET);
+  var gst = ss.getSheetByName(GST_SHEET);
+  var today = startOfDay_(new Date());
+  var upVals = up.getDataRange().getValues();
+  var iName = colOf_(upVals[0], 'Customer name');
+  var iStatus = colOf_(upVals[0], COL_STATUS);
+  var gCols = {};
+  var gstVals = gst.getDataRange().getValues();
+  GST_COLUMNS.forEach(function (c) { gCols[c] = colOf_(gstVals[0], c); });
+
+  var existing = {};                       // invoice numbers already in GST RECORDS
+  for (var r = 1; r < gstVals.length; r++) {
+    var v = String(gstVals[r][0] || '').trim();
+    if (INVOICE_RE.test(v)) existing[v] = true;
+  }
+
+  var log = [];
+  var results = body.results || [];
+  for (var i = 0; i < results.length; i++) {
+    var res = results[i];
+    var m = String(res.key || '').match(/^up_r(\d+)_/);
+    if (!m) { log.push('bad key ' + res.key); continue; }
+    var row = parseInt(m[1], 10) - 1;      // 0-based data index in UPCOMING BILLS
+    if (row < 1 || row >= upVals.length) { log.push('row out of range for ' + res.key); continue; }
+    var name = String(upVals[row][iName] || '').trim();
+
+    if (!res.ok) {
+      var cur = iStatus >= 0 ? String(upVals[row][iStatus] || '') : '';
+      if (cur.indexOf('BILLED') !== 0)       // never overwrite a real success
+        setStatus_(up, row, iStatus, 'ERROR ' + fmt_(today) + ': ' + String(res.error || 'unknown').slice(0, 90));
+      log.push(name + ': ERROR ' + String(res.error || '').slice(0, 80));
+      continue;
+    }
+
+    var invNo = String(res.new_invoice_no || '').trim();
+    if (!existing[invNo]) {
+      var last = findLastGstRecord_(gstVals, name);
+      if (!last) {
+        setStatus_(up, row, iStatus, 'ERROR ' + fmt_(today) + ': no GST record to copy for ' + name + ' — fill manually');
+        log.push(name + ': no GST record to copy — NOT appended, fill manually');
+        continue;
+      }
+      appendGstRecord_(gst, gCols, {
+        invoiceNo: invNo,
+        invoiceDate: String(res.invoice_date || '').replace(/-/g, '/'),
+        customer: last.customer, gstin: last.gstin, desc: last.desc,
+        amount: last.amount, cgst: last.cgst, sgst: last.sgst, total: last.total,
+        mode: last.mode
+      });
+      existing[invNo] = true;
+    }
+    setStatus_(up, row, iStatus, 'BILLED ' + invNo + ' on ' + fmt_(today) +
+      (res.pdf_error ? ' (PDF FAILED)' : ''));
+    log.push(name + ': ' + (existing[invNo] && res.duplicate ? 'already recorded' : 'record appended') +
+      ' — BILLED ' + invNo);
+  }
+  return { ok: true, log: log };
 }
 
 /* ------------------------------------------------------- invoice numbering */
@@ -181,15 +214,15 @@ function callPython_(rec) {
 var lastInvoiceCache_ = null;
 
 function nextInvoiceNo_(gstVals, billDate) {
-  if (lastInvoiceCache_) {                                  // sequential within one run
+  if (lastInvoiceCache_) {                                  // sequential within one request
     var fy = fyOf_(billDate);
     var n = (fy === lastInvoiceCache_.fy) ? lastInvoiceCache_.num + 1 : 1;
     return PREFIX + '/' + pad_(n, lastInvoiceCache_.width || 3) + '/' + fy;
   }
-  var last = null, lastRow = -1;
+  var last = null;
   for (var r = 1; r < gstVals.length; r++) {
     var v = String(gstVals[r][0] || '').trim();
-    if (INVOICE_RE.test(v)) { last = v; lastRow = r; }
+    if (INVOICE_RE.test(v)) last = v;
   }
   if (!last) return PREFIX + '/001/' + fyOf_(billDate);
   var m = last.match(INVOICE_RE);
@@ -281,6 +314,12 @@ function dice_(a, b) {
 
 /* ------------------------------------------------------------------ helpers */
 
+function setStatus_(sheet, row, iStatus, text) {
+  if (iStatus < 0) return;
+  sheet.getRange(row + 1, iStatus + 1).setValue(text);
+  SpreadsheetApp.flush();
+}
+
 function ensureColumn_(sheet, title) {
   var lastCol = sheet.getLastColumn();                      // ignores trailing empty cols
   var header = sheet.getRange(1, 1, 1, lastCol).getValues()[0];
@@ -311,4 +350,8 @@ function startOfDay_(d) { return new Date(d.getFullYear(), d.getMonth(), d.getDa
 function addDays_(d, n) { return new Date(d.getFullYear(), d.getMonth(), d.getDate() + n); }
 function fmt_(d) { return pad_(d.getDate(), 2) + '/' + pad_(d.getMonth() + 1, 2) + '/' + pad_(d.getFullYear() % 100, 2); }
 function pad_(n, w) { var s = String(n); while (s.length < w) s = '0' + s; return s; }
-function log_(msg) { Logger.log(msg); }
+
+function jsonOut_(obj) {
+  return ContentService.createTextOutput(JSON.stringify(obj))
+    .setMimeType(ContentService.MimeType.JSON);
+}

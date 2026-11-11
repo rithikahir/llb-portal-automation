@@ -43,10 +43,15 @@ from the portal's live responses** on every run — stale values are never reuse
   - [Transfer log (`transfer_log.csv`)](#transfer-log-transfer_logcsv)
 - [Script 4 — `update_bills.py` (GST bill updater)](#script-4--update_billspy-gst-bill-updater)
   - [What it updates](#what-it-updates)
-  - [Server mode (for Apps Script)](#server-mode-for-apps-script)
+  - [Server mode (optional, for the old push flow)](#server-mode-optional-for-the-old-push-flow)
   - [One-shot CLI mode](#one-shot-cli-mode)
   - [Apps Script side](#apps-script-side)
   - [Safety & outputs](#safety--outputs)
+- [Script 5 — `run_billing.py` (the daily bill run, local only)](#script-5--run_billingpy-the-daily-bill-run-local-only)
+  - [How the pieces fit](#how-the-pieces-fit)
+  - [One-time setup](#one-time-setup)
+  - [Running it](#running-it)
+  - [What you see in the sheet](#what-you-see-in-the-sheet)
 - [Troubleshooting](#troubleshooting)
 - [Sessions & security notes](#sessions--security-notes)
 - [Related files](#related-files)
@@ -516,7 +521,7 @@ untouched — edits are label-anchored (`Invoice No`, `Invoice Date`,
 `Bill Period`) so only those values are rewritten. All repeated copies
 (merged cells) are updated too.
 
-## Server mode (for Apps Script)
+## Server mode (optional, for the old push flow)
 
 ```powershell
 python update_bills.py
@@ -598,32 +603,116 @@ prompted. On a plain LAN URL Apps Script cannot reach the machine directly.
   Both are gitignored.
 - Windows quirk: run as `python update_bills.py ...`, never `.\update_bills.py`.
 
-## Google Sheet integration (`Code.gs`)
+## `Code.gs` integration (sheet side)
 
-`Code.gs` (in this repo) is pasted into Extensions > Apps Script of the
-"Copy of GST_BILL_RECORDS" sheet. It runs daily via a time-driven trigger:
+`Code.gs` (in this repo) is pasted into Extensions > Apps Script of the GST
+sheet. It is deployed as a **Web App** — the local `run_billing.py` script
+calls it; nothing on Google's side runs by itself (no trigger, no tunnel).
 
-1. reads `UPCOMING BILLS` (due = Expire Date on/before today, Bill Status empty),
-2. finds the customer's **last** invoice in `GST RECORDS` (fuzzy name match)
-   to copy GSTIN / description / amounts / payment mode,
-3. computes the next **global** invoice no: `ST/046/2026-27 -> ST/047/2026-27`,
-   restarting at `ST/001/2027-28` after each 31 March,
-4. POSTs `{customer, bill_file?, new_invoice_no, key}` to this Python server
-   (which writes that exact number into the bill — no local +1),
-5. appends the new record to `GST RECORDS` (`Payment Status` = Pending),
-6. marks the row `BILLED <no> <date>` in the new **Bill Status** column
-   (col F) so it never runs twice; failures are marked `ERROR ...` and can be
-   fixed + cleared manually.
+What it does when called:
 
-Test first with `dryRunOnce()` (logs only), then run `processDueBills()` and
-add the trigger. `BILLS_API` inside `Code.gs` points at
-`http://127.0.0.1:8765/update`; if Apps Script must reach the PC from
-Google's cloud, replace it with a tunnel URL (ngrok/cloudflared). The sheet
-ID is a constant in `Code.gs` — **nothing from the sheet goes into `.env`**.
+- **`get_due`** — returns every `UPCOMING BILLS` row whose Expire Date is on
+  or before a cutoff sent by Python (default: yesterday; the run also marks
+  those rows `PROCESSING` so two overlapping runs can never double-bill).
+- **`complete`** — after Python has edited the bills, this appends the new
+  rows to `GST RECORDS` (copying GSTIN / description / amounts / payment
+  mode from the customer's **last** invoice, fuzzy name match; `Payment
+  Status` = Pending) **only if that invoice number is not already there**
+  (crash-safe), and marks `Bill Status` `BILLED <no> <date>` or
+  `ERROR <date>: <msg>` (fixable — clear the cell and re-run with `--resume`).
+
+Invoice numbers are **global**: `ST/046/2026-27 -> ST/047/2026-27`,
+restarting at `ST/001/2027-28` after each 31 March. Python writes the exact
+number Apps Script computed.
+
+The sheet ID and a shared secret are constants in `Code.gs`; the web app URL
+and the same secret live in `.env` (`appscript_url`, `appscript_secret`).
+See **Script 5** below for the full setup.
 
 Optional helper column: `Bill File` (col E of UPCOMING BILLS) — exact docx
 name for customers whose name doesn't uniquely map to a file (e.g. the Skin
-City variants, Spes Manning vs Router, Mufatlal, Station HQ, Airan 1/2).
+City variants, Spes Manning vs Router, Station HQ, Airan 1/2).
+
+---
+
+# Script 5 — `run_billing.py` (the daily bill run, local only)
+
+The replacement for the cron job: **you** decide when to bill. Run it from
+the project folder:
+
+```powershell
+python run_billing.py --dry-run    # preview: shows who is due, edits nothing
+python run_billing.py              # the real run
+```
+
+## How the pieces fit
+
+```
+you run run_billing.py (PC)
+        │  1. POST get_due  ──────────────►  Apps Script Web App
+        │                                    reads UPCOMING BILLS, marks due
+        │                                    rows PROCESSING, returns them
+        │         ◄──── list of due bills ──┘
+        │  2. for each bill (all on YOUR PC):
+        │        pick the .docx (fuzzy or 'Bill File' column)
+        │        rewrite Invoice Date / Invoice No / Bill Period
+        │        backup → docx saved in place → PDF via LibreOffice
+        │  3. POST complete ──────────────►  Apps Script Web App
+        │                                    appends GST RECORDS rows,
+        ◄──────────────────────────────────► marks BILLED / ERROR
+```
+
+No tunnel and no always-on server are needed — the connection lives only for
+the few seconds the script runs.
+
+## One-time setup
+
+1. Open the sheet → Extensions → Apps Script → paste this repo's `Code.gs`.
+2. In `Code.gs` set `SECRET` to the value of `appscript_secret` from `.env`.
+3. Deploy → New deployment → type **Web app** → Execute as: **Me** →
+   Who has access: **Anyone** → Deploy → copy the URL ending in `/exec`.
+4. Put that URL in `.env`:  `appscript_url :- https://script.google.com/.../exec`
+5. Test in the editor with `dryRunOnce()` (logs a preview, changes nothing).
+6. Test locally with `python run_billing.py --dry-run`.
+
+`.env` keys used by this script:
+
+| key | meaning |
+|---|---|
+| `appscript_url :-` | the Web App `/exec` URL |
+| `appscript_secret :-` | shared secret, must equal `SECRET` in `Code.gs` |
+| `pdf_dir :-` | **directory controller** for the PDFs (default `Desktop\gst_bills`) |
+| `bills_dir :-` | optional: where the bill `.docx` templates live |
+
+Remember: every time you edit `Code.gs`, create a new deployment version
+(Deploy → Manage deployments → Edit → Version: New), or the old code keeps
+running.
+
+## Running it
+
+```powershell
+python run_billing.py                    # bills everything that expired yesterday or earlier
+python run_billing.py --include-today    # also rows that expire today
+python run_billing.py --days 7           # everything that expired in the last week
+python run_billing.py --resume           # finish rows stuck in PROCESSING (after a crash)
+python run_billing.py --dry-run          # preview only
+```
+
+Exit codes: `0` all good, `2` config/connection problem, `3` some bills
+failed (they're marked `ERROR` in Bill Status; fix, clear the cell, re-run
+with `--resume`). Re-runs are safe: Python's `bills_state.json` dedupes by
+key and Apps Script only appends a GST row when the invoice number is not
+already in the sheet.
+
+## What you see in the sheet
+
+- `UPCOMING BILLS` gains **Bill Status**: `PROCESSING` (run in progress /
+  crashed — clear it or use `--resume`), `BILLED ST/047/2026-27 on 11/11/26`,
+  or `ERROR ...` (retriable).
+- `GST RECORDS` gains the new invoice rows with `Payment Status` = Pending —
+  fill Payment Date / GST PAID after collection.
+- PDFs land in the `pdf_dir` folder from `.env` (`Desktop\gst_bills` by
+  default); every edited docx is backed up in `Shreeganesh_Telecom_GST_BILLS_backup\`.
 
 ---
 
