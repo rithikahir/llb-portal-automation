@@ -5,6 +5,9 @@ recharge_log.csv
 transfer_gate.json
 transfer_log.csv
 
+# business documents (GST bills)
+Shreeganesh_Telecom_GST_BILLS/
+
 # python build artefacts
 __pycache__/
 *.pyc
