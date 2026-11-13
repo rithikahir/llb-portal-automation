@@ -311,23 +311,24 @@ function durationText_(m) {
 var lastInvoiceCache_ = null;
 
 function nextInvoiceNo_(gstVals, billDate) {
-  if (lastInvoiceCache_) {                                  // sequential within one request
-    var fy = fyOf_(billDate);
-    var n = (fy === lastInvoiceCache_.fy) ? lastInvoiceCache_.num + 1 : 1;
-    return PREFIX + '/' + pad_(n, lastInvoiceCache_.width || 3) + '/' + fy;
-  }
-  var last = null;
-  for (var r = 1; r < gstVals.length; r++) {
-    var v = String(gstVals[r][0] || '').trim();
-    if (INVOICE_RE.test(v)) last = v;
-  }
-  if (!last) return PREFIX + '/001/' + fyOf_(billDate);
-  var m = last.match(INVOICE_RE);
-  var lastNum = parseInt(m[1], 10), lastFy = m[2] + '-' + m[3];
   var fyNow = fyOf_(billDate);
-  var num = (fyNow === lastFy) ? lastNum + 1 : 1;
-  lastInvoiceCache_ = { num: num, fy: fyNow, width: m[1].length };
-  return PREFIX + '/' + pad_(num, m[1].length) + '/' + fyNow;
+  if (lastInvoiceCache_) {                                  // sequential within one request
+    var n = (fyNow === lastInvoiceCache_.fy) ? lastInvoiceCache_.num + 1 : 1;
+    lastInvoiceCache_ = { num: n, fy: fyNow, width: lastInvoiceCache_.width || 3 };
+    return PREFIX + '/' + pad_(n, lastInvoiceCache_.width) + '/' + fyNow;
+  }
+  // first call of this execution: take the numerically HIGHEST invoice no for
+  // the current FY (safe even if the sheet's rows are not in invoice order)
+  var maxNum = 0, width = 3;
+  for (var r = 1; r < gstVals.length; r++) {
+    var m = String(gstVals[r][0] || '').trim().match(INVOICE_RE);
+    if (!m || (m[2] + '-' + m[3]) !== fyNow) continue;
+    var num = parseInt(m[1], 10);
+    if (num > maxNum) { maxNum = num; width = m[1].length; }
+  }
+  var next = maxNum + 1;
+  lastInvoiceCache_ = { num: next, fy: fyNow, width: width };
+  return PREFIX + '/' + pad_(next, width) + '/' + fyNow;
 }
 
 function fyOf_(d) {

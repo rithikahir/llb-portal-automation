@@ -41,14 +41,11 @@ from the portal's live responses** on every run — stale values are never reuse
   - [What it does, step by step](#what-it-does-step-by-step-1)
   - [The anti-double-transfer gate](#the-anti-double-transfer-gate)
   - [Transfer log (`logs\transfer_log.csv`)](#transfer-log-logstransfer_logcsv)
-- [Script 4 — `update_bills.py` (GST bill updater)](#script-4--update_billspy-gst-bill-updater)
-  - [What it updates](#what-it-updates)
-  - [Server mode (optional, for the old push flow)](#server-mode-optional-for-the-old-push-flow)
-  - [One-shot CLI mode](#one-shot-cli-mode)
-  - [Apps Script side](#apps-script-side)
-  - [Safety & outputs](#safety--outputs)
-- [Script 5 — `run_billing.py` (the daily bill run, local only)](#script-5--run_billingpy-the-daily-bill-run-local-only)
+- [Script 4 — `run_billing.py` (GST billing — driver + bill engine in one)](#script-4--run_billingpy-gst-billing--driver--bill-engine-in-one)
   - [How the pieces fit](#how-the-pieces-fit)
+  - [What gets updated in a bill](#what-gets-updated-in-a-bill)
+  - [One-shot mode (bill one customer by hand)](#one-shot-mode-bill-one-customer-by-hand)
+  - [Safety & outputs](#safety--outputs)
   - [One-time setup](#one-time-setup)
   - [Running it](#running-it)
   - [What you see in the sheet](#what-you-see-in-the-sheet)
@@ -501,19 +498,46 @@ transfer_datetime,from_account,partner_id,partner_name,amount,remark
 
 ---
 
-# Script 4 — `update_bills.py` (GST bill updater)
+# Script 4 — `run_billing.py` (GST billing — driver + bill engine in one)
 
-Keeps the bills in `Shreeganesh_Telecom_GST_BILLS\` rolling forward. When
-Google Apps Script picks up a record (a customer + its current invoice no),
-it POSTs it here; the script picks that customer's bill `.docx`, updates it
-and produces the PDF.
+The one script for everything billing (the old `update_bills.py` was merged
+into it and deleted). **You** decide when to bill; run it from the project
+folder. It asks the Apps Script Web App who is due, edits each customer's
+bill `.docx` in place, produces the PDF, and reports back so the sheet is
+updated — all in one run.
 
-## What it updates
+```powershell
+python run_billing.py --dry-run    # preview: shows who is due, edits nothing
+python run_billing.py              # the real run
+```
+
+## How the pieces fit
+
+```
+you run run_billing.py (PC)
+        │  1. POST get_due  ──────────────►  Apps Script Web App
+        │                                    reads UPCOMING BILLS, returns
+        │                                    the due rows (read-only)
+        │         ◄──── list of due bills ──┘
+        │  2. for each bill (all on YOUR PC):
+        │        pick the .docx (fuzzy or 'Bill File' column)
+        │        rewrite Invoice Date / Invoice No / Bill Period
+        │        docx saved in place → PDF via LibreOffice
+        │  3. POST complete ──────────────►  Apps Script Web App
+        │                                    appends GST RECORDS rows,
+        ◄──────────────────────────────────► advances Expire Dates,
+                                             re-sorts UPCOMING BILLS
+```
+
+No tunnel and no always-on server are needed — the connection lives only for
+the few seconds the script runs.
+
+## What gets updated in a bill
 
 | Field | Before → After |
 |---|---|
 | `Invoice Date : - 18-07-26` | today's date, **in the bill's own format** (e.g. `11-11-26`) |
-| `Invoice No : - ST/023/2026-27` | number **+1**, same width & prefix → `ST/024/2026-27` |
+| `Invoice No : - ST/023/2026-27` | the **exact next global number** Apps Script computed (e.g. `ST/024/2026-27`) |
 | `Bill Period:-17/07/2026 to 16/01/2027` | advanced by the bill's **own duration** in whole calendar months (`auto`, default): 1-month bill → next month, 3-month → 3, 13-month → 13. Alternatives: `next` (day-count), `year` (both dates +1 year) |
 
 Everything else in the document (amounts, GSTIN, buyer address, item rows) is
@@ -521,75 +545,29 @@ untouched — edits are label-anchored (`Invoice No`, `Invoice Date`,
 `Bill Period`) so only those values are rewritten. All repeated copies
 (merged cells) are updated too.
 
-## Server mode (optional, for the old push flow)
+**Idempotency:** the same run re-executed never edits twice — Python's
+`logs\bills_state.json` dedupes by key (second attempt answers from cache
+with `duplicate: true`). This protects against re-running after a crash
+(which would otherwise bump the invoice number and shift the period twice).
 
-```powershell
-python update_bills.py
-# listening on http://0.0.0.0:8765  (POST /update, GET /health)
-```
+## One-shot mode (bill one customer by hand)
 
-Payload (JSON):
-
-```json
-{
-  "customer": "SKIN CITY",          // matches SKIN_CITY_BILL.docx (fuzzy, unique)
-  "invoice_no": "ST/023/2026-27",   // CURRENT invoice no from the tracker; the script writes +1
-  "key": "row-123",                 // unique id from Apps Script — strongly recommended
-  "bill_file": "optional.docx",     // or pick the file directly
-  "new_invoice_no": "ST/024/2026-27", // optional: write this exact no (testing)
-  "invoice_date": "11-11-26",       // optional: override the date
-  "period_shift": "year"            // optional: "year" (default) or "next"
-}
-```
-
-Response (JSON): `{ok, bill, old/new_invoice_no, invoice_date,
-old/new_bill_period, pdf, pdf_created, ...}`. Errors return
-`{ok: false, error}` with HTTP 500/400.
-
-**Idempotency:** the same `key` POSTed twice never edits twice — the second
-call answers from cache with `duplicate: true`. This protects against
-Apps Script retrying a timed-out request (which would otherwise bump the
-invoice number and shift the period twice).
-
-## One-shot CLI mode
+No sheet contact — useful for manual fixes and testing:
 
 ```powershell
 # preview (changes nothing)
-python update_bills.py --customer "SKIN CITY" --invoice-no "ST/023/2026-27" --dry-run
+python run_billing.py --customer "SKIN CITY" --invoice-no "ST/023/2026-27" --dry-run
 
 # real run: updates the docx in place + writes Desktop\gst_bills\SKIN_CITY_BILL.pdf
-python update_bills.py --customer "SKIN CITY" --invoice-no "ST/023/2026-27"
+python run_billing.py --customer "SKIN CITY" --invoice-no "ST/023/2026-27"
 
 # pick the file directly, shift the period to the consecutive one
-python update_bills.py --bill-file SKIN_CITY_BILL.docx --period-shift next
+python run_billing.py --bill-file SKIN_CITY_BILL.docx --period-shift next
 ```
 
 Flags: `--customer`, `--bill-file`, `--invoice-no`, `--new-invoice-no`,
 `--invoice-date`, `--period-shift {auto,next,year}`, `--pdf-dir`, `--bills-dir`,
-`--dry-run`, and for the server `--serve --host --port`.
-
-## Apps Script side
-
-```javascript
-function updateGstBill(rec) {
-  var res = UrlFetchApp.fetch('http://YOUR_PC_IP:8765/update', {
-    method: 'post',
-    contentType: 'application/json',
-    payload: JSON.stringify({
-      customer:   rec.customerName,   // e.g. 'SKIN CITY'
-      invoice_no: rec.invoiceNo,      // current 'ST/023/2026-27'
-      key:        rec.rowId           // unique per record — enables dedupe
-    }),
-    muteHttpExceptions: true
-  });
-  Logger.log(res.getContentText());
-}
-```
-
-Reachability: Apps Script runs on Google's servers, so `YOUR_PC_IP` must be
-publicly reachable — use a tunnel (ngrok / cloudflared → e.g.
-`https://xxx.ngrok.app`) and allow Python through the Windows firewall when
-prompted. On a plain LAN URL Apps Script cannot reach the machine directly.
+`--dry-run`.
 
 ## Safety & outputs
 
@@ -598,13 +576,13 @@ prompted. On a plain LAN URL Apps Script cannot reach the machine directly.
   swapped in only when complete).
 - PDF → `Desktop\gst_bills\<bill name>.pdf` (LibreOffice headless; MS Word via
   COM as fallback). If PDF conversion fails, the docx update still stands and
-  the response carries `pdf_error`.
+  the result carries `pdf_error`.
 - `logs\bills_update_log.csv` — one line per successful update (old→new invoice no,
   periods, pdf path, key). `logs\bills_state.json` — the idempotency cache.
   Both are gitignored.
-- Windows quirk: run as `python update_bills.py ...`, never `.\update_bills.py`.
+- Windows quirk: run as `python run_billing.py ...`, never `.\run_billing.py`.
 
-## `Code.js` integration (sheet side)
+## Apps Script side (`Code.js`)
 
 `Code.js` (in this repo) is pasted into Extensions > Apps Script of the GST
 sheet. It is deployed as a **Web App** — the local `run_billing.py` script
@@ -632,44 +610,13 @@ number Apps Script computed.
 
 The sheet ID and a shared secret are constants in `Code.js`; the web app URL
 and the same secret live in `.env` (`appscript_url`, `appscript_secret`).
-See **Script 5** below for the full setup.
+See the one-time setup below for the full details.
 
 Optional helper column: `Bill File` (col E of UPCOMING BILLS) — exact docx
 name for customers whose name doesn't uniquely map to a file (e.g. the Skin
 City variants, Spes Manning vs Router, Station HQ, Airan 1/2).
 
 ---
-
-# Script 5 — `run_billing.py` (the daily bill run, local only)
-
-The replacement for the cron job: **you** decide when to bill. Run it from
-the project folder:
-
-```powershell
-python run_billing.py --dry-run    # preview: shows who is due, edits nothing
-python run_billing.py              # the real run
-```
-
-## How the pieces fit
-
-```
-you run run_billing.py (PC)
-        │  1. POST get_due  ──────────────►  Apps Script Web App
-        │                                    reads UPCOMING BILLS, returns
-        │                                    the due rows (read-only)
-        │         ◄──── list of due bills ──┘
-        │  2. for each bill (all on YOUR PC):
-        │        pick the .docx (fuzzy or 'Bill File' column)
-        │        rewrite Invoice Date / Invoice No / Bill Period
-        │        docx saved in place → PDF via LibreOffice
-        │  3. POST complete ──────────────►  Apps Script Web App
-        │                                    appends GST RECORDS rows,
-        ◄──────────────────────────────────► advances Expire Dates,
-                                             re-sorts UPCOMING BILLS
-```
-
-No tunnel and no always-on server are needed — the connection lives only for
-the few seconds the script runs.
 
 ## One-time setup
 
@@ -731,7 +678,7 @@ to edit a bill whose current invoice number doesn't match the sheet
 
 ## Troubleshooting
 
-### Both scripts
+### All scripts
 
 | Symptom | Cause / fix |
 |---|---|
@@ -799,6 +746,6 @@ to edit a bill whose current invoice number doesn't match the sheet
 | `logs\recharge_log.csv` | Written by `auto_renew.py` on every confirmed recharge. Limited fields (customer id/name, recharge date, activation date, expiry date), newest-first. Dry-runs/aborts/failures are never logged. Contains customer names — store carefully. |
 | `logs\transfer_gate.json` | Anti-double-transfer marker file written by `transfer_balance.py`. Same handling rules as `logs\renew_gate.json`. |
 | `logs\transfer_log.csv` | Written by `transfer_balance.py` on every ledger-confirmed transfer (datetime, source account, target partner, amount, remark), newest-first. |
-| `logs\bills_update_log.csv` / `logs\bills_state.json` | Bill update history / dedupe cache for `update_bills.py`. |
+| `logs\bills_update_log.csv` / `logs\bills_state.json` | Bill update history / dedupe cache for `run_billing.py`. |
 | `RENEWAL_ENDPOINTS.md` | Full documentation of the renewal endpoints and payload. |
 | `AUTOMATION_ASSESSMENT.md` | Safety assessment of automating renewals. |
