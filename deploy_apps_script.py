@@ -3,6 +3,11 @@
 deploy_apps_script.py — push local Apps Script code and update the EXISTING
 web app deployment in place (the /exec URL in .env never changes).
 
+Apps Script project files live in  appscript\\  (Code.js, appsscript.json,
+.clasp.json, .claspignore) — clasp needs them all in one folder; this script
+runs clasp from there. Everything else (Python scripts, .env, logs, bills)
+stays in the project root.
+
 Flow:
   1. reads .env  ->  appscript_url  (…/macros/s/<DEPLOYMENT_ID>/exec)
   2. clasp push                  (uploads Code.js + appsscript.json)
@@ -18,7 +23,8 @@ Usage:
 
 Rollback (if a deploy misbehaves):
   clasp update-deployment <DEPLOYMENT_ID> --versionNumber 3
-  (each version stays listed under: clasp list-versions)
+  (each version stays listed under: clasp list-versions — run it from the
+  appscript folder)
 
 Requires: clasp (npm i -g @google/clasp) and an active `clasp login`.
 """
@@ -36,6 +42,10 @@ from pathlib import Path
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 ENV_FILE = SCRIPT_DIR / ".env"
+# clasp's project files (Code.js, appsscript.json, .clasp.json, .claspignore)
+# live in the appscript\ folder — clasp must run from there, and Code.js must
+# stay in the same folder as its config or clasp refuses to push it.
+APPS_SCRIPT_DIR = SCRIPT_DIR / "appscript"
 DEFAULT_DEPLOYMENT_DESC = "update from local Code.js"
 
 
@@ -69,7 +79,7 @@ def run_clasp(args: list[str], *, capture: bool = True) -> subprocess.CompletedP
     cmd = [exe, *args]
     log(f"$ {' '.join(cmd)}")
     return subprocess.run(
-        cmd, cwd=str(SCRIPT_DIR), capture_output=capture, text=True,
+        cmd, cwd=str(APPS_SCRIPT_DIR), capture_output=capture, text=True,
         encoding="utf-8", errors="replace",
     )
 
@@ -113,8 +123,8 @@ def main() -> int:
     log(f"[plan] webhook URL stays      : {url}")
 
     # 0. sanity: no local conflict, files exist
-    if not (SCRIPT_DIR / "Code.js").exists():
-        raise SystemExit("ERROR: Code.js not found next to this script")
+    if not (APPS_SCRIPT_DIR / "Code.js").exists():
+        raise SystemExit(f"ERROR: Code.js not found in {APPS_SCRIPT_DIR}")
     st = run_clasp(["status"])
     if st.returncode != 0:
         raise SystemExit(f"ERROR: clasp status failed ({st.stdout} {st.stderr}) — resolve conflicts first")

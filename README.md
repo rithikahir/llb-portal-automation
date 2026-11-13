@@ -584,7 +584,10 @@ Flags: `--customer`, `--bill-file`, `--invoice-no`, `--new-invoice-no`,
 
 ## Apps Script side (`Code.js`)
 
-`Code.js` (in this repo) is pasted into Extensions > Apps Script of the GST
+`Code.js` lives in this repo at `appscript\Code.js` (together with clasp's
+project files — `appscript\.clasp.json`, `appscript\.claspignore`,
+`appscript\appsscript.json` — clasp requires them in one folder). Its
+contents are pasted into Extensions > Apps Script of the GST
 sheet. It is deployed as a **Web App** — the local `run_billing.py` script
 calls it; nothing on Google's side runs by itself (no trigger, no tunnel).
 
@@ -620,7 +623,7 @@ City variants, Spes Manning vs Router, Station HQ, Airan 1/2).
 
 ## One-time setup
 
-1. Open the sheet → Extensions → Apps Script → paste this repo's `Code.js`.
+1. Open the sheet → Extensions → Apps Script → paste `appscript\Code.js`.
 2. Seed the secrets: in `Code.js`'s editor open `setupSecrets()`, paste the
    values of `appscript_secret` / `sheet_id` from `.env` into its two
    placeholder arguments, run it once and authorize. (Or POST
@@ -642,7 +645,7 @@ City variants, Spes Manning vs Router, Station HQ, Airan 1/2).
 | `pdf_dir :-` | **directory controller** for the PDFs (default `Desktop\gst_bills`) |
 | `bills_dir :-` | optional: where the bill `.docx` templates live |
 
-Remember: every time you edit `Code.js`, create a new deployment version
+Remember: every time you edit `appscript\Code.js`, create a new deployment version
 (Deploy → Manage deployments → Edit → Version: New), or the old code keeps
 running. From this PC that is automated:  `python deploy_apps_script.py`
 
@@ -747,5 +750,8 @@ to edit a bill whose current invoice number doesn't match the sheet
 | `logs\transfer_gate.json` | Anti-double-transfer marker file written by `transfer_balance.py`. Same handling rules as `logs\renew_gate.json`. |
 | `logs\transfer_log.csv` | Written by `transfer_balance.py` on every ledger-confirmed transfer (datetime, source account, target partner, amount, remark), newest-first. |
 | `logs\bills_update_log.csv` / `logs\bills_state.json` | Bill update history / dedupe cache for `run_billing.py`. |
+| `appscript\Code.js` | The Apps Script source pasted into the GST sheet (Web App). |
+| `appscript\.clasp.json`, `appscript\.claspignore`, `appscript\appsscript.json` | Clasp project files — used by `deploy_apps_script.py` to push and version the Apps Script code. |
+| `deploy_apps_script.py` | One command: push `appscript\Code.js` and update the existing web app deployment (URL unchanged). |
 | `RENEWAL_ENDPOINTS.md` | Full documentation of the renewal endpoints and payload. |
 | `AUTOMATION_ASSESSMENT.md` | Safety assessment of automating renewals. |

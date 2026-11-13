@@ -1,6 +1,7 @@
 # clasp push should upload ONLY Apps Script sources (Code.js, appsscript.json).
 # Everything else — customer data, logs, bills, secrets — stays local.
-# (gitignore-style globs, read automatically from the project root)
+# (gitignore-style globs, read automatically from the appscript\ folder,
+#  which is the folder this file lives in — clasp's project root)
 
 # runtime data with customer + partner info
 logs/
