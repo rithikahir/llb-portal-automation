@@ -1,0 +1,29 @@
+# clasp push should upload ONLY Apps Script sources (Code.js, appsscript.json).
+# Everything else — customer data, logs, bills, secrets — stays local.
+# (gitignore-style globs, read automatically from the project root)
+
+# runtime data with customer + partner info
+logs/
+
+# business documents (GST bills) — never leave this machine
+Shreeganesh_Telecom_GST_BILLS/
+Shreeganesh_Telecom_GST_BILLS_backup/
+
+# local tooling that is not Apps Script code
+*.py
+*.md
+*.csv
+*.docx
+*.pdf
+
+# secrets & local-only config
+.env
+.clasp.json
+.gitignore
+
+# junk / caches
+__pycache__/
+.git/
+ResearchFiles/
+*.har
+node_modules/
