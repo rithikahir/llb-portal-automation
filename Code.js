@@ -1,31 +1,38 @@
 /**
- * Code.gs — GST bill automation, LOCAL-ONLY edition (Web App).
+ * Code.js — GST bill automation, LOCAL-ONLY edition (Web App).
  *
- * NEW FLOW (no tunnel, no daily trigger, no server running on the PC):
+ * FLOW (no tunnel, no daily trigger, no server running on the PC):
  *   You run  python run_billing.py  on the PC whenever you want to bill.
  *   That script calls THIS web app twice:
  *
  *     1. action "get_due"
  *        Reads UPCOMING BILLS. A row is DUE when Expire Date <= a cutoff
- *        (sent by Python; default = yesterday) and Bill Status is empty
- *        (or PROCESSING when --resume). For each due row it:
+ *        (sent by Python; default = yesterday). For each due row it:
  *          - finds the customer's LAST invoice in GST RECORDS (fuzzy match)
  *            so its GSTIN/description/amounts/payment mode can be copied,
  *          - computes the next GLOBAL invoice no from the last row
  *            (ST/046/2026-27 -> ST/047/2026-27; restarts ST/001/2027-28
  *            after each 31 March),
- *          - marks the row PROCESSING so two runs can never overlap,
  *          - returns the list to Python.
+ *        This app NEVER creates or writes the "Bill File" / "Bill Status"
+ *        columns (Bill File is only ever READ, if the column exists).
  *
  *     2. action "complete"
  *        Python edited the .docx files and made the PDFs, then sends back
  *        per-row results. For each success this app appends the new row to
  *        GST RECORDS (Payment Status "Pending", date as text) — ONLY if
- *        that invoice number is not already there (crash-safe) — and marks
- *        Bill Status "BILLED <no> <date>". Errors are marked "ERROR ...".
+ *        that invoice number is not already there (crash-safe) — then
+ *        ADVANCES the customer's Expire Date to the new period end,
+ *        UPDATES the Duration column (e.g. "1 Year" / "3 Months", sent by
+ *        Python from the new bill period) and RE-SORTS UPCOMING BILLS by
+ *        Expire Date (nearest first).
+ *
+ * SECRETS: SECRET / SHEET_ID come from Script Properties (Project Settings),
+ *          seeded once via setupSecrets() or rotated via the "set_props"
+ *          action — never hardcode them in this file.
  *
  * ONE-TIME SETUP:
- *   1. Put your secret here:  SECRET = '<value of appscript_secret in .env>'
+ *   1. Seed secrets (see setupSecrets below) with the .env values.
  *   2. Deploy > New deployment > type: Web app
  *        Execute as: Me       Who has access: Anyone
  *      Copy the Web App URL (ends in /exec) into .env:
@@ -34,8 +41,9 @@
  *   4. On the PC:  python run_billing.py --dry-run   then without --dry-run.
  *
  * NOTE: after editing this code you must create a NEW DEPLOYMENT VERSION
- *       (Deploy > Manage deployments > Edit > Version: New) or the old
- *       code keeps running.
+ *       (Deploy > Manage deployments > Edit > Version: New), or simply run
+ *       `python deploy_apps_script.py` on the PC, or the old code keeps
+ *       running.
  */
 
 var PROPS = PropertiesService.getScriptProperties();
@@ -47,9 +55,8 @@ var SECRET = PROPS.getProperty('SECRET') || '';
 var UPCOMING_SHEET = 'UPCOMING BILLS';
 var GST_SHEET = 'GST RECORDS';
 
-var COL_BILL_FILE = 'Bill File';     // UPCOMING BILLS: optional exact docx name
-var COL_STATUS = 'Bill Status';      // UPCOMING BILLS: PROCESSING/BILLED/ERROR
-var TAG_PROCESSING = 'PROCESSING';
+var COL_BILL_FILE = 'Bill File';     // UPCOMING BILLS: optional exact docx name (READ ONLY)
+var COL_DURATION = 'Duration';       // UPCOMING BILLS: written after billing, e.g. '1 Year' / '3 Months'
 var PREFIX = 'ST';                   // invoice prefix
 
 var INVOICE_RE = /^ST\/(\d+)\/(\d{4})-(\d{1,2})$/;
@@ -128,7 +135,7 @@ function setProps_(body) {
 
 /** Editor-only preview: logs exactly what get_due would return (marks nothing). */
 function dryRunOnce() {
-  var r = getDue_({ dry: true, resume: true, secret: SECRET });
+  var r = getDue_({ dry: true, secret: SECRET });
   Logger.log('cutoff: ' + r.cutoff + '   due: ' + r.due.length);
   r.due.forEach(function (d) {
     Logger.log('  ' + d.customer + ' | expires ' + d.expire +
@@ -153,21 +160,15 @@ function getDue_(body) {
   var iName = colOf_(upHeader, 'Customer name');
   var iExp = colOf_(upHeader, 'Expire Date');
   if (iName < 0 || iExp < 0) throw new Error('UPCOMING BILLS needs "Customer name" and "Expire Date" columns');
-  var iFile = ensureColumn_(up, COL_BILL_FILE);
-  var iStatus = ensureColumn_(up, COL_STATUS);
+  var iFile = colOf_(upHeader, COL_BILL_FILE); // READ ONLY; may not exist — never created
 
   var gstVals = gst.getDataRange().getValues();
-  var due = [], claim = [];
+  var due = [];
   for (var r = 1; r < upVals.length; r++) {
     var name = String(upVals[r][iName] || '').trim();
     var expire = asDate_(upVals[r][iExp]);
     if (!name || !expire) continue;
     if (expire > cutoff) continue;
-    var status = String(upVals[r][iStatus] || '').trim();
-    var isFree = status === '';
-    var isProcessing = status.indexOf(TAG_PROCESSING) === 0;
-    if (isFree) claim.push(r);
-    else if (!isProcessing || !body.resume) continue;   // BILLED/ERROR stays untouched
 
     var last = findLastGstRecord_(gstVals, name);
     due.push({
@@ -175,21 +176,14 @@ function getDue_(body) {
       row: r + 1,
       customer: name,
       expire: fmt_(expire),
-      bill_file: String(upVals[r][iFile] || '').trim(),
-      status: status,
+      bill_file: iFile >= 0 ? String(upVals[r][iFile] || '').trim() : '',
       new_invoice_no: nextInvoiceNo_(gstVals, today),
       last_invoice_no: last ? last.invoiceNo : null,
       has_gst_record: !!last
     });
   }
 
-  if (!body.dry && claim.length) {
-    claim.forEach(function (r) {
-      up.getRange(r + 1, iStatus + 1).setValue(TAG_PROCESSING + ' ' + fmt_(today));
-    });
-    SpreadsheetApp.flush();
-  }
-  return { ok: true, dry: !!body.dry, cutoff: fmt_(cutoff), claimed: claim.length, due: due };
+  return { ok: true, dry: !!body.dry, cutoff: fmt_(cutoff), due: due };
 }
 
 /* -------------------------------------------------------------- action 2 */
@@ -198,10 +192,12 @@ function complete_(body) {
   var ss = SpreadsheetApp.openById(SHEET_ID);
   var up = ss.getSheetByName(UPCOMING_SHEET);
   var gst = ss.getSheetByName(GST_SHEET);
-  var today = startOfDay_(new Date());
   var upVals = up.getDataRange().getValues();
   var iName = colOf_(upVals[0], 'Customer name');
-  var iStatus = colOf_(upVals[0], COL_STATUS);
+  var iExp = colOf_(upVals[0], 'Expire Date');
+  if (iName < 0 || iExp < 0)
+    throw new Error('UPCOMING BILLS needs "Customer name" and "Expire Date" columns');
+  var iDur = colOf_(upVals[0], COL_DURATION);  // written only if the column exists
   var gCols = {};
   var gstVals = gst.getDataRange().getValues();
   GST_COLUMNS.forEach(function (c) { gCols[c] = colOf_(gstVals[0], c); });
@@ -213,6 +209,7 @@ function complete_(body) {
   }
 
   var log = [];
+  var moved = 0;
   var results = body.results || [];
   for (var i = 0; i < results.length; i++) {
     var res = results[i];
@@ -223,9 +220,8 @@ function complete_(body) {
     var name = String(upVals[row][iName] || '').trim();
 
     if (!res.ok) {
-      var cur = iStatus >= 0 ? String(upVals[row][iStatus] || '') : '';
-      if (cur.indexOf('BILLED') !== 0)       // never overwrite a real success
-        setStatus_(up, row, iStatus, 'ERROR ' + fmt_(today) + ': ' + String(res.error || 'unknown').slice(0, 90));
+      // nothing written to the row: it keeps its old Expire Date, so the
+      // next run picks it up again automatically (built-in retry).
       log.push(name + ': ERROR ' + String(res.error || '').slice(0, 80));
       continue;
     }
@@ -234,7 +230,6 @@ function complete_(body) {
     if (!existing[invNo]) {
       var last = findLastGstRecord_(gstVals, name);
       if (!last) {
-        setStatus_(up, row, iStatus, 'ERROR ' + fmt_(today) + ': no GST record to copy for ' + name + ' — fill manually');
         log.push(name + ': no GST record to copy — NOT appended, fill manually');
         continue;
       }
@@ -247,12 +242,68 @@ function complete_(body) {
       });
       existing[invNo] = true;
     }
-    setStatus_(up, row, iStatus, 'BILLED ' + invNo + ' on ' + fmt_(today) +
-      (res.pdf_error ? ' (PDF FAILED)' : ''));
+
+    // advance the customer's Expire Date to the new period end, and record
+    // the plan Duration (months sent by Python from the new bill period)
+    var note = ' — ' + invNo;
+    var newExp = asDate_(res.new_expire);
+    if (newExp) {
+      var oldExp = asDate_(upVals[row][iExp]);
+      var cell = up.getRange(row + 1, iExp + 1);
+      cell.setNumberFormat('dd/mm/yy');          // real date, same style as the column
+      cell.setValue(newExp);
+      upVals[row][iExp] = fmt_(newExp);
+      moved++;
+
+      var dm = parseInt(res.duration_months, 10);
+      if (!(dm > 0) && oldExp) dm = monthsBetween_(oldExp, newExp); // fallback: expire shift
+      if (iDur >= 0 && dm > 0) {
+        var durText = durationText_(dm);
+        up.getRange(row + 1, iDur + 1).setValue(durText);
+        note += ', ' + durText;
+      }
+      note += ', expire moved to ' + fmt_(newExp);
+    } else {
+      note += ' recorded (no new expire sent)';
+    }
     log.push(name + ': ' + (existing[invNo] && res.duplicate ? 'already recorded' : 'record appended') +
-      ' — BILLED ' + invNo);
+      note + (res.pdf_error ? ' (PDF FAILED)' : ''));
   }
+
+  if (moved) sortUpcomingByExpire_(up, iExp);
   return { ok: true, log: log };
+}
+
+/** Re-orders the data rows of UPCOMING BILLS by Expire Date, nearest first. */
+function sortUpcomingByExpire_(up, iExp) {
+  var lastRow = up.getLastRow();
+  if (lastRow < 2) return;
+  var lastCol = up.getLastColumn();
+  var vals = up.getRange(2, 1, lastRow - 1, lastCol).getValues();
+  vals.sort(function (a, b) {
+    var da = asDate_(a[iExp]);
+    var db = asDate_(b[iExp]);
+    if (!da && !db) return 0;
+    if (!da) return 1;                         // rows without a date go last
+    if (!db) return -1;
+    return da - db;
+  });
+  up.getRange(2, 1, lastRow - 1, lastCol).setValues(vals);
+  SpreadsheetApp.flush();
+}
+
+/* ------------------------------------------------------ duration utilities */
+
+/** Whole calendar months between two dates (02/01/2026 -> 01/01/2027 = 12). */
+function monthsBetween_(d1, d2) {
+  return (d2.getFullYear() - d1.getFullYear()) * 12 + (d2.getMonth() - d1.getMonth());
+}
+
+/** 12 -> '1 Year', 24 -> '2 Years', 1 -> '1 Month', 3 -> '3 Months'. */
+function durationText_(m) {
+  if (m === 12) return '1 Year';
+  if (m > 12 && m % 12 === 0) return (m / 12) + ' Years';
+  return m === 1 ? '1 Month' : m + ' Months';
 }
 
 /* ------------------------------------------------------- invoice numbering */
@@ -359,22 +410,6 @@ function dice_(a, b) {
 }
 
 /* ------------------------------------------------------------------ helpers */
-
-function setStatus_(sheet, row, iStatus, text) {
-  if (iStatus < 0) return;
-  sheet.getRange(row + 1, iStatus + 1).setValue(text);
-  SpreadsheetApp.flush();
-}
-
-function ensureColumn_(sheet, title) {
-  var lastCol = sheet.getLastColumn();                      // ignores trailing empty cols
-  var header = sheet.getRange(1, 1, 1, lastCol).getValues()[0];
-  var idx = header.indexOf(title);
-  if (idx >= 0) return idx;
-  sheet.getRange(1, lastCol + 1).setValue(title);           // append new column
-  SpreadsheetApp.flush();
-  return lastCol;                                           // 0-based index of the new column
-}
 
 function colOf_(header, title) {
   for (var i = 0; i < header.length; i++) {

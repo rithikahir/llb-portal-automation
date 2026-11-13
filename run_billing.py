@@ -18,12 +18,12 @@ You run this by hand whenever you want to bill. It:
      Nothing is ever written to the Bill File / Bill Status columns.
 
 Idempotent end-to-end: the same run can be re-executed safely. Python's
-bills_state.json dedupes by key, Apps Script only appends a GST row when
+bills_state.json (in the logs folder) dedupes by key, Apps Script only appends a GST row when
 that invoice number is not already in GST RECORDS, and Python refuses to
 edit a bill whose invoice number doesn't match what the sheet expected.
 
 Setup (one time):
-  * Deploy Code.gs as a Web App (Deploy > New deployment > Web app;
+  * Deploy Code.js as a Web App (Deploy > New deployment > Web app;
     Execute as: Me; Who has access: Anyone) and paste its /exec URL into
     .env  appscript_url :-
   * Put the value of .env  appscript_secret :-  into SECRET in Code.gs.
@@ -94,7 +94,7 @@ def main() -> int:
     url = args.url or setting("appscript_url") or ""
     if not url or "PASTE" in url.upper():
         print("ERROR: .env has no real 'appscript_url :-' yet.\n"
-              "Deploy Code.gs as a Web App (Deploy > New deployment > Web app,\n"
+              "Deploy Code.js as a Web App (Deploy > New deployment > Web app,\n"
               "Execute as: Me, access: Anyone), copy the /exec URL and put it in .env:\n"
               "    appscript_url :- https://script.google.com/macros/s/...../exec",
               file=sys.stderr)
@@ -141,10 +141,15 @@ def main() -> int:
             print(f"  {item['customer']}: {'(already done, skipped)' if dup else 'billed'}"
                   f" {res['new_invoice_no']}  period {res['old_bill_period']} -> {res['new_bill_period']}"
                   f"{pdf_note}")
+            # plan duration in whole calendar months, from the NEW bill period
+            # (e.g. 02/01/2027 to 01/01/2028 -> 12) for the sheet's Duration column
+            _s, _e = [U.parse_date(x) for x in str(res["new_bill_period"]).split(" to ")]
+            _dm = (_e.year - _s.year) * 12 + (_e.month - _s.month) if (_s and _e) else None
             results.append({"key": item["key"], "ok": True, "duplicate": dup,
                             "new_invoice_no": res["new_invoice_no"],
                             "invoice_date": res["invoice_date"],
                             "new_expire": str(res["new_bill_period"]).split(" to ")[-1],
+                            "duration_months": _dm,
                             "pdf_error": res.get("pdf_error")})
         except Exception as exc:
             failed += 1
@@ -156,7 +161,7 @@ def main() -> int:
         print("Dry run finished — nothing was saved, the sheet was not touched.")
         return 0
 
-    # ---- 3. report back: append GST rows, set BILLED/ERROR -----------------
+    # ---- 3. report back: append GST rows, advance Expire Dates + Duration ---
     resp2 = call_apps_script(url, {"action": "complete", "secret": secret, "results": results})
     if not resp2.get("ok"):
         print(f"ERROR while updating the sheet: {resp2.get('error')}\n"
