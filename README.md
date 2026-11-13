@@ -32,7 +32,7 @@ from the portal's live responses** on every run — stale values are never reuse
   - [What it does, step by step](#what-it-does-step-by-step)
   - [The anti-double-recharge gate](#the-anti-double-recharge-gate)
   - [Exit codes](#exit-codes)
-  - [Recharge log (`recharge_log.csv`)](#recharge-log-recharge_logcsv)
+  - [Recharge log (`logs\recharge_log.csv`)](#recharge-log-logsrecharge_logcsv)
   - [Generating a cURL for Postman (`--curl`)](#generating-a-curl-for-postman---curl)
 - [Script 3 — `transfer_balance.py` (guarded wallet transfer)](#script-3--transfer_balancepy-guarded-wallet-transfer)
   - [Usage](#usage-2)
@@ -40,7 +40,7 @@ from the portal's live responses** on every run — stale values are never reuse
   - [Flags](#flags-1)
   - [What it does, step by step](#what-it-does-step-by-step-1)
   - [The anti-double-transfer gate](#the-anti-double-transfer-gate)
-  - [Transfer log (`transfer_log.csv`)](#transfer-log-transfer_logcsv)
+  - [Transfer log (`logs\transfer_log.csv`)](#transfer-log-logstransfer_logcsv)
 - [Script 4 — `update_bills.py` (GST bill updater)](#script-4--update_billspy-gst-bill-updater)
   - [What it updates](#what-it-updates)
   - [Server mode (optional, for the old push flow)](#server-mode-optional-for-the-old-push-flow)
@@ -290,7 +290,7 @@ more specific phrase or the numeric id.
                   anti-double-recharge gate (see below)
 5. CONFIRM        summary + yes/NO prompt (skip with --force)
 6. SUBMIT ONCE    POST DoPurchaseRenewPlan exactly once
-                  success  -> record in renew_gate.json + recharge_log.csv
+                  success  -> record in logs\renew_gate.json + logs\recharge_log.csv
                   rejected -> FAILED-FLAGGED message (exit 2), never retried
                   network error -> OUTCOME UNKNOWN (exit 3), NEVER auto-retried
 7. VERIFY         GET Recent Purchase/Renew Report (ResReport.aspx) and
@@ -306,7 +306,7 @@ implemented**.
 The vendor API is **not idempotent** — a second submission = a second debit.
 The gate has two layers:
 
-1. **Local marker (`renew_gate.json`)** — an *"attempted"* record (customer id,
+1. **Local marker (`logs\renew_gate.json`)** — an *"attempted"* record (customer id,
    date/time) is written **before the POST fires**. This blocks re-runs if the
    script crashed/ended without a confirmed outcome, or if the same customer
    already got a confirmed recharge **today**. A previous `attempted`/
@@ -329,7 +329,7 @@ protects same-day duplicates.
 | `3`  | Outcome UNKNOWN (network error/timeout; verify the report before re-running) |
 | `4`  | Blocked by the anti-double-recharge gate |
 
-## Recharge log (`recharge_log.csv`)
+## Recharge log (`logs\recharge_log.csv`)
 
 One line per **confirmed success**, inserted at the TOP (newest first; older
 entries shift down). Deliberately minimal fields only:
@@ -462,21 +462,21 @@ python transfer_balance.py --partner-id 54 --amount 100 \
 5. Gate: local marker + **same-day ledger check** on Balance Transfer History
    (a matching `Transfer Balance To` row already on the ledger blocks the run).
 6. Prints the full summary → `yes/NO` prompt (skipped with `--force`).
-7. Writes the *"attempted"* marker to `transfer_gate.json` **before** the POST.
+7. Writes the *"attempted"* marker to `logs\transfer_gate.json` **before** the POST.
 8. Submits the WebForms POST **exactly once** — no retry after timeout or
    HTTP error (outcome UNKNOWN → verify the ledger manually; the gate stays
    closed until resolved).
 9. Verifies on the portal's own **Balance Transfer History** report: a
    `Transfer Balance To <partner>` debit row dated today with the exact
    amount (checked up to 4 times, 15 s apart). Only a confirmed match updates
-   the gate to `confirmed` and writes `transfer_log.csv`.
+   the gate to `confirmed` and writes `logs\transfer_log.csv`.
 10. Prints the confirmed ledger row (including the closing wallet balance).
 
 ## The anti-double-transfer gate
 
 Same two-layer design as the recharge gate:
 
-1. **Local marker (`transfer_gate.json`)** — the *"attempted"* record is
+1. **Local marker (`logs\transfer_gate.json`)** — the *"attempted"* record is
    written **before** the POST. Any `attempted`/`unknown` record blocks all
    re-runs (any partner, any amount) until you resolve it; a *confirmed*
    record blocks the same partner + amount + day duplicate.
@@ -486,10 +486,10 @@ Same two-layer design as the recharge gate:
 
 To re-run deliberately after checking the ledger yourself:
 `--bypass-gate`. Resolving stuck `attempted`/`unknown` entries: delete the
-entry from `transfer_gate.json` (after verifying the report) or use
+entry from `logs\transfer_gate.json` (after verifying the report) or use
 `--bypass-gate` once.
 
-## Transfer log (`transfer_log.csv`)
+## Transfer log (`logs\transfer_log.csv`)
 
 One line per **confirmed transfer**, inserted at the TOP (newest first).
 Only after ledger verification — dry-runs, prompt-aborts, `--curl` and
@@ -599,14 +599,14 @@ prompted. On a plain LAN URL Apps Script cannot reach the machine directly.
 - PDF → `Desktop\gst_bills\<bill name>.pdf` (LibreOffice headless; MS Word via
   COM as fallback). If PDF conversion fails, the docx update still stands and
   the response carries `pdf_error`.
-- `bills_update_log.csv` — one line per successful update (old→new invoice no,
-  periods, pdf path, key). `bills_state.json` — the idempotency cache.
+- `logs\bills_update_log.csv` — one line per successful update (old→new invoice no,
+  periods, pdf path, key). `logs\bills_state.json` — the idempotency cache.
   Both are gitignored.
 - Windows quirk: run as `python update_bills.py ...`, never `.\update_bills.py`.
 
-## `Code.gs` integration (sheet side)
+## `Code.js` integration (sheet side)
 
-`Code.gs` (in this repo) is pasted into Extensions > Apps Script of the GST
+`Code.js` (in this repo) is pasted into Extensions > Apps Script of the GST
 sheet. It is deployed as a **Web App** — the local `run_billing.py` script
 calls it; nothing on Google's side runs by itself (no trigger, no tunnel).
 
@@ -630,7 +630,7 @@ Invoice numbers are **global**: `ST/046/2026-27 -> ST/047/2026-27`,
 restarting at `ST/001/2027-28` after each 31 March. Python writes the exact
 number Apps Script computed.
 
-The sheet ID and a shared secret are constants in `Code.gs`; the web app URL
+The sheet ID and a shared secret are constants in `Code.js`; the web app URL
 and the same secret live in `.env` (`appscript_url`, `appscript_secret`).
 See **Script 5** below for the full setup.
 
@@ -673,8 +673,12 @@ the few seconds the script runs.
 
 ## One-time setup
 
-1. Open the sheet → Extensions → Apps Script → paste this repo's `Code.gs`.
-2. In `Code.gs` set `SECRET` to the value of `appscript_secret` from `.env`.
+1. Open the sheet → Extensions → Apps Script → paste this repo's `Code.js`.
+2. Seed the secrets: in `Code.js`'s editor open `setupSecrets()`, paste the
+   values of `appscript_secret` / `sheet_id` from `.env` into its two
+   placeholder arguments, run it once and authorize. (Or POST
+   `{action:'set_props', secret:<current>, props:{SECRET:'…', SHEET_ID:'…'}}`
+   to the `/exec` URL.) Secrets live in **Script Properties**, never in code.
 3. Deploy → New deployment → type **Web app** → Execute as: **Me** →
    Who has access: **Anyone** → Deploy → copy the URL ending in `/exec`.
 4. Put that URL in `.env`:  `appscript_url :- https://script.google.com/.../exec`
@@ -686,13 +690,14 @@ the few seconds the script runs.
 | key | meaning |
 |---|---|
 | `appscript_url :-` | the Web App `/exec` URL |
-| `appscript_secret :-` | shared secret, must equal `SECRET` in `Code.gs` |
+| `appscript_secret :-` | shared secret — matches the `SECRET` Script Property (rotate via `set_props`) |
+| `sheet_id :-` | the GST Google Sheet ID (matches the `SHEET_ID` Script Property) |
 | `pdf_dir :-` | **directory controller** for the PDFs (default `Desktop\gst_bills`) |
 | `bills_dir :-` | optional: where the bill `.docx` templates live |
 
-Remember: every time you edit `Code.gs`, create a new deployment version
+Remember: every time you edit `Code.js`, create a new deployment version
 (Deploy → Manage deployments → Edit → Version: New), or the old code keeps
-running.
+running. From this PC that is automated:  `python deploy_apps_script.py`
 
 ## Running it
 
@@ -706,7 +711,7 @@ python run_billing.py --dry-run          # preview only
 Exit codes: `0` all good, `2` config/connection problem, `3` some bills
 failed (nothing was changed for those customers in the sheet — they stay
 due and are retried automatically on the next run). Re-runs are safe:
-Python's `bills_state.json` dedupes by key, Apps Script only appends a GST
+Python's `bills_state.json` (in `logs\`) dedupes by key, Apps Script only appends a GST
 row when the invoice number is not already in the sheet, and Python refuses
 to edit a bill whose current invoice number doesn't match the sheet
 (double-bill guard).
@@ -766,10 +771,12 @@ to edit a bill whose current invoice number doesn't match the sheet
   sliding). There is no explicit logout — nothing persists between runs.
 - Every token (`__VIEWSTATE`, `__EVENTVALIDATION`, CSRF) is parsed fresh per
   run; no captured values are ever reused.
-- Files that contain customer/partner data: `recharge_log.csv`,
-  `transfer_log.csv` (names), `renew_gate.json` / `transfer_gate.json` (ids),
-  and any exported `--curl` output (cookies + context). Store and share them
-  carefully; the scripts print reminders when creating files.
+- Files that contain customer/partner data (all under `logs\`):
+  `recharge_log.csv`, `transfer_log.csv` (names), `renew_gate.json` /
+  `transfer_gate.json` (ids), `bills_update_log.csv` / `bills_state.json`
+  (bill history), and any exported `--curl` output (cookies + context).
+  Store and share them carefully; the scripts print reminders when creating
+  files.
 - `crm_customers.py` is 100% read-only (renew dialog fetched but never
   submitted). Submitting renewals happens **only** in `auto_renew.py`, behind
   the confirm/gate layers described above.
@@ -788,9 +795,10 @@ to edit a bill whose current invoice number doesn't match the sheet
 | `transfer_balance.py` | Guarded one-shot partner-to-partner wallet transfer (Python). |
 | `.env` | Credentials — local only (format `username :-` / `password :-`). |
 | `auto_renew.ps1` | PowerShell renewal trigger (original; same flow, kept for reference). |
-| `renew_gate.json` | Anti-double-recharge marker file written by `auto_renew.py`. Created automatically; deleting entries weakens the gate — only remove after checking the Recent Purchase/Renew Report. |
-| `recharge_log.csv` | Written by `auto_renew.py` on every confirmed recharge. Limited fields (customer id/name, recharge date, activation date, expiry date), newest-first. Dry-runs/aborts/failures are never logged. Contains customer names — store carefully. |
-| `transfer_gate.json` | Anti-double-transfer marker file written by `transfer_balance.py`. Same handling rules as `renew_gate.json`. |
-| `transfer_log.csv` | Written by `transfer_balance.py` on every ledger-confirmed transfer (datetime, source account, target partner, amount, remark), newest-first. |
+| `logs\renew_gate.json` | Anti-double-recharge marker file written by `auto_renew.py`. Created automatically; deleting entries weakens the gate — only remove after checking the Recent Purchase/Renew Report. |
+| `logs\recharge_log.csv` | Written by `auto_renew.py` on every confirmed recharge. Limited fields (customer id/name, recharge date, activation date, expiry date), newest-first. Dry-runs/aborts/failures are never logged. Contains customer names — store carefully. |
+| `logs\transfer_gate.json` | Anti-double-transfer marker file written by `transfer_balance.py`. Same handling rules as `logs\renew_gate.json`. |
+| `logs\transfer_log.csv` | Written by `transfer_balance.py` on every ledger-confirmed transfer (datetime, source account, target partner, amount, remark), newest-first. |
+| `logs\bills_update_log.csv` / `logs\bills_state.json` | Bill update history / dedupe cache for `update_bills.py`. |
 | `RENEWAL_ENDPOINTS.md` | Full documentation of the renewal endpoints and payload. |
 | `AUTOMATION_ASSESSMENT.md` | Safety assessment of automating renewals. |

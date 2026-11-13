@@ -38,8 +38,12 @@
  *       code keeps running.
  */
 
-var SHEET_ID = '1taT1_t4GITmjndE8K9ZXDrrLh9BZGD3Os-AAgniZcAM';
-var SECRET = '2917f7027dd1a18a30d27bf36f59a1b3';
+var PROPS = PropertiesService.getScriptProperties();
+// Secrets live in Script Properties (Apps Script: Project Settings), seeded /
+// rotated from .env values via POST {action:'set_props', secret, props}.
+// First-time setup: run setupSecrets() in the editor once (values pasted there).
+var SHEET_ID = PROPS.getProperty('SHEET_ID') || '';
+var SECRET = PROPS.getProperty('SECRET') || '';
 var UPCOMING_SHEET = 'UPCOMING BILLS';
 var GST_SHEET = 'GST RECORDS';
 
@@ -63,11 +67,15 @@ function doPost(e) {
   } catch (err) {
     return jsonOut_({ ok: false, error: 'bad JSON body' });
   }
+  if (!SECRET)
+    return jsonOut_({ ok: false,
+      error: 'server not configured — seed Script Properties first (see setupSecrets in the editor or POST set_props)' });
   if (String(body.secret || '') !== SECRET)
     return jsonOut_({ ok: false, error: 'bad or missing secret' });
   try {
     if (body.action === 'get_due') return jsonOut_(getDue_(body));
     if (body.action === 'complete') return jsonOut_(complete_(body));
+    if (body.action === 'set_props') return jsonOut_(setProps_(body));
     return jsonOut_({ ok: false, error: 'unknown action: ' + body.action });
   } catch (err) {
     return jsonOut_({ ok: false, error: String(err && err.message || err) });
@@ -77,7 +85,45 @@ function doPost(e) {
 /** Browser test that the web app is alive. */
 function doGet() {
   return jsonOut_({ ok: true, service: 'gst-bill-automation',
-                    actions: ['get_due', 'complete'] });
+                    actions: ['get_due', 'complete', 'set_props'] });
+}
+
+/**
+ * One-time setup, run manually in the Apps Script editor (▶ button):
+ * replace the two placeholder arguments with the real values from the
+ * local .env (appscript_secret / sheet_id), run it, authorize, done.
+ * Never commit real values here — after seeding, restore the placeholders.
+ */
+function setupSecrets() {
+  var secret = '';   // <-- paste .env appscript_secret
+  var sheetId = '';  // <-- paste .env sheet_id
+  var p = PropertiesService.getScriptProperties();
+  if (secret) p.setProperty('SECRET', secret);
+  if (sheetId) p.setProperty('SHEET_ID', sheetId);
+  Logger.log('configured: SECRET=' + (p.getProperty('SECRET') ? 'yes' : 'no')
+    + '  SHEET_ID=' + (p.getProperty('SHEET_ID') ? 'yes' : 'no'));
+}
+
+/**
+ * Secret-gated property management (rotation / first-time seeding).
+ * POST {action:'set_props', secret:<current>, props:{SECRET:'…', SHEET_ID:'…'}}
+ * Never echoes values back; returns only the property names that were set.
+ */
+function setProps_(body) {
+  var allowed = { SECRET: 1, SHEET_ID: 1 };
+  var set = [];
+  var props = body.props || {};
+  Object.keys(props).forEach(function (k) {
+    if (!allowed[k]) return;
+    var v = String(props[k] || '').trim();
+    if (!v) return;
+    PROPS.setProperty(k, v);
+    set.push(k);
+  });
+  if (!set.length) throw new Error('no valid properties to set (allowed: SECRET, SHEET_ID)');
+  if (set.indexOf('SECRET') >= 0) SECRET = PROPS.getProperty('SECRET');
+  if (set.indexOf('SHEET_ID') >= 0) SHEET_ID = PROPS.getProperty('SHEET_ID');
+  return { ok: true, set: set };
 }
 
 /** Editor-only preview: logs exactly what get_due would return (marks nothing). */
