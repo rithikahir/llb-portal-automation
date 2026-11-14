@@ -624,6 +624,8 @@ function renderBillSuccess(app, params) {
     '<div class="line" style="display:flex;justify-content:space-between;padding:4px 0"><span class="meta-line">Duration</span><b>' + r.duration_months + ' months</b></div>' +
     '<div class="line" style="display:flex;justify-content:space-between;padding:4px 0"><span class="meta-line">Sheet update</span><b>' +
     (r.sheet_updated === false ? '<span style="color:var(--danger)">⚠ NOT updated</span>' : 'updated ✓') + '</b></div>' +
+    (r.pdf_source ? '<div class="line" style="display:flex;justify-content:space-between;padding:4px 0"><span class="meta-line">PDF layout</span><b>' +
+      (String(r.pdf_source).indexOf('word-template') === 0 ? 'Word template ✓' : esc(r.pdf_source)) + '</b></div>' : '') +
     '</div>' +
     (r.sheet_updated === false
       ? '<div class="card" style="background:var(--danger-soft);border-color:#fecaca"><div class="meta-line" style="color:var(--danger)"><b>⚠ PDF created and saved on this phone, but the sheet was NOT updated:</b><br>' + esc(r.sheet_error || 'unknown error') + '<br><br><b>Fix:</b> open this customer and bill again — the same invoice number will be reused and the sheet will be updated then.</div></div>'
