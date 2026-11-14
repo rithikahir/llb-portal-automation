@@ -589,7 +589,11 @@ function renderBillForm(app, params) {
         .then(function () { return res; });
     }).then(function (res) {
       busy(false);
-      toast('Billed ✓ ' + res.invoice_no);
+      if (res.sheet_updated === false) {
+        toast('PDF saved — but sheet update FAILED', true);
+      } else {
+        toast('Billed ✓ ' + res.invoice_no);
+      }
       go(renderBillSuccess, { result: res });
       refreshData(false);
     }).catch(function (e) {
@@ -618,8 +622,12 @@ function renderBillSuccess(app, params) {
     '<div class="line" style="display:flex;justify-content:space-between;padding:4px 0"><span class="meta-line">New bill period</span><b>' + esc(r.period.start) + ' → ' + esc(r.period.end) + '</b></div>' +
     '<div class="line" style="display:flex;justify-content:space-between;padding:4px 0"><span class="meta-line">New expiry</span><b>' + esc(r.new_expire) + '</b></div>' +
     '<div class="line" style="display:flex;justify-content:space-between;padding:4px 0"><span class="meta-line">Duration</span><b>' + r.duration_months + ' months</b></div>' +
-    '<div class="line" style="display:flex;justify-content:space-between;padding:4px 0"><span class="meta-line">Sheet + PDF</span><b>updated ✓</b></div>' +
+    '<div class="line" style="display:flex;justify-content:space-between;padding:4px 0"><span class="meta-line">Sheet update</span><b>' +
+    (r.sheet_updated === false ? '<span style="color:var(--danger)">⚠ NOT updated</span>' : 'updated ✓') + '</b></div>' +
     '</div>' +
+    (r.sheet_updated === false
+      ? '<div class="card" style="background:var(--danger-soft);border-color:#fecaca"><div class="meta-line" style="color:var(--danger)"><b>⚠ PDF created and saved on this phone, but the sheet was NOT updated:</b><br>' + esc(r.sheet_error || 'unknown error') + '<br><br><b>Fix:</b> open this customer and bill again — the same invoice number will be reused and the sheet will be updated then.</div></div>'
+      : '') +
     '<div class="btn-row"><button class="btn" id="viewPdf">👁 View</button>' +
     '<button class="btn" id="sharePdf">📤 Share</button></div>' +
     '<div class="btn-row"><button class="btn primary" id="savePdf">⬇️ Save PDF to phone</button></div>' +
