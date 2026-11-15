@@ -67,7 +67,8 @@ def call(action: str, extra: dict | None = None, url_override: str = "") -> dict
 
 def main() -> None:
     ap = argparse.ArgumentParser()
-    ap.add_argument("command", choices=["ping", "list", "pdf", "template"])
+    ap.add_argument("command", choices=["ping", "list", "pdf", "template",
+                                        "folder", "docs", "checkdocs", "rebuild", "pdfs"])
     ap.add_argument("invoice_no", nargs="?", default="")
     ap.add_argument("--limit", type=int, default=0)
     ap.add_argument("--url", default="",
@@ -104,14 +105,14 @@ def main() -> None:
     if args.command == "pdf":
         if not args.invoice_no:
             sys.exit("usage:  python test_backend.py pdf ST/053/2026-27")
-        out = call("make_pdf", {"invoice_no": args.invoice_no}, url_override=args.url)   # regenerates, no sheet writes
+        out = call("make_pdf", {"invoice_no": args.invoice_no}, url_override=args.url)   # archived PDF, no sheet writes
         import base64
         dest = HERE / "test_pdfs"
         dest.mkdir(exist_ok=True)
-        name = (out.get("name") or (args.invoice_no.replace("/", "_") + ".pdf")).replace("/", "_")
+        name = (out.get("pdf_name") or (args.invoice_no.replace("/", "_") + ".pdf")).replace("/", "_")
         path = dest / name
         path.write_bytes(base64.b64decode(out["pdf_base64"]))
-        print(f"saved {path}  ({path.stat().st_size} bytes)  [source: {out.get('pdf_source')}]")
+        print(f"saved {path}  ({path.stat().st_size} bytes)")
         return
 
     if args.command == "template":
@@ -121,9 +122,57 @@ def main() -> None:
         out = call("set_props", {"props": {"BILL_TEMPLATE_DOC_ID": doc_id}}, url_override=args.url)
         if doc_id:
             print(f"word template registered: doc {doc_id} (set: {out.get('set')})")
-            print("the backend can now generate bills identical to the Word layout")
+            print("rebuild_doc can now create customer docs from this template")
         else:
-            print("word template cleared — bills fall back to the built-in HTML layout")
+            print("word template cleared")
+        return
+
+    if args.command == "folder":
+        if not args.invoice_no:
+            sys.exit('usage:  python test_backend.py folder <driveFolderId>   ("clear" removes it)')
+        fid = "" if args.invoice_no.lower() == "clear" else args.invoice_no
+        out = call("set_props", {"props": {"DOCS_FOLDER_ID": fid}}, url_override=args.url)
+        if fid:
+            print(f"docs folder registered: {fid} (set: {out.get('set')})")
+            print("next: python test_backend.py docs   (build the customer->doc mapping)")
+        else:
+            print("docs folder cleared")
+        return
+
+    if args.command == "docs":
+        out = call("sync_docs", url_override=args.url)
+        print(f"docs found: {out['docs_found']}   customers: {out['customers']}   mapped: {out['mapped']}\n")
+        for e in out["report"]:
+            print(f"  {e['doc'][:36]:36} {'GoogleDoc' if e['isGoogleDoc'] else 'docx/blob ':9} "
+                  f"{str(e['match'])[:30]:30} {e['status']}")
+        return
+
+    if args.command == "checkdocs":
+        out = call("check_docs", {"export_test": True}, url_override=args.url)
+        ok = 0
+        for e in out["results"]:
+            print(f"  [{e['status'][:1]}] {e['customer'][:32]:32} {e['status']}")
+            if e["status"] == "OK":
+                ok += 1
+        print(f"\nOK: {ok}/{len(out['results'])}")
+        return
+
+    if args.command == "rebuild":
+        if not args.invoice_no:
+            sys.exit('usage:  python test_backend.py rebuild "<exact customer name>"')
+        out = call("rebuild_doc", {"customer": args.invoice_no}, url_override=args.url)
+        print(f"rebuilt doc for {out['customer']}: id {out['doc_id']}")
+        print(f"export test: {out.get('export_test')}   mapped: {out.get('mapped')}")
+        return
+
+    if args.command == "pdfs":
+        if not args.invoice_no:
+            sys.exit('usage:  python test_backend.py pdfs "<customer name>"')
+        out = call("list_pdfs", {"customer": args.invoice_no}, url_override=args.url)
+        print(f"archived PDFs for {out['customer']}: {len(out['files'])}"
+              + (f"   folder: {out['folder_url']}" if out.get("folder_url") else ""))
+        for f in out["files"]:
+            print(f"  {f['name'][:60]:60} {f['size']:>9} bytes")
         return
 
 

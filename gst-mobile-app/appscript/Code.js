@@ -91,6 +91,12 @@ function doPost(e) {
     if (body.action === 'bill_customer') return jsonOut_(billCustomer_(body));
     if (body.action === 'make_pdf') return jsonOut_(makePdf_(body));
     if (body.action === 'debug_pdf') return jsonOut_(debugPdf_(body));
+    // ---- customer-doc billing (edit-in-place + Drive archive) actions ----
+    if (body.action === 'sync_docs') return jsonOut_(syncDocs_(body));
+    if (body.action === 'check_docs') return jsonOut_(checkDocs_(body));
+    if (body.action === 'rebuild_doc') return jsonOut_(rebuildDoc_(body));
+    if (body.action === 'list_pdfs') return jsonOut_(listPdfs_(body));
+    if (body.action === 'get_pdf') return jsonOut_(getPdf_(body));
     return jsonOut_({ ok: false, error: 'unknown action: ' + body.action });
   } catch (err) {
     return jsonOut_({ ok: false, error: String(err && err.message || err) });
@@ -101,7 +107,9 @@ function doPost(e) {
 function doGet() {
   return jsonOut_({ ok: true, service: 'gst-bill-automation',
                     actions: ['get_due', 'complete', 'set_props',
-                              'ping', 'list_all', 'bill_customer', 'make_pdf'] });
+                              'ping', 'list_all', 'bill_customer', 'make_pdf',
+                              'sync_docs', 'check_docs', 'rebuild_doc',
+                              'list_pdfs', 'get_pdf'] });
 }
 
 /**
@@ -126,7 +134,8 @@ function setupSecrets() {
  * Never echoes values back; returns only the property names that were set.
  */
 function setProps_(body) {
-  var allowed = { SECRET: 1, SHEET_ID: 1, BILL_TEMPLATE_DOC_ID: 1 };
+  var allowed = { SECRET: 1, SHEET_ID: 1, BILL_TEMPLATE_DOC_ID: 1,
+                  DOCS_FOLDER_ID: 1, PDFS_FOLDER_ID: 1 };
   var set = [];
   var props = body.props || {};
   Object.keys(props).forEach(function (k) {
@@ -649,7 +658,7 @@ function billCustomer_(body) {
   var userid = String(body.userid || '').trim();
   if (!userid && iUser >= 0) userid = String(upVals[row][iUser] || '').trim();
 
-  // --- generate the PDF FIRST (in memory only — NEVER saved to Drive) ------
+  // --- edit the customer's own Google Doc in place, export + archive PDF ---
   // Nothing is written to the sheet unless this succeeds.
   var bill = {
     buyer: last.customer,
@@ -664,9 +673,10 @@ function billCustomer_(body) {
     amount: amount, cgst: cgst, sgst: sgst, total: total,
     mode: mode
   };
+  var lastMonths = parseDuration_(iDur >= 0 ? String(upVals[row][iDur] || '') : '');
   var pdf;
   try {
-    pdf = renderBillPdf_(bill);
+    pdf = billViaCustomerDoc_(custName, last, oldExp, lastMonths, bill);
   } catch (err) {
     throw new Error('PDF generation failed — sheet NOT updated. ' + String(err && err.message || err));
   }
@@ -724,92 +734,466 @@ function billCustomer_(body) {
     amount: amount, cgst: cgst, sgst: sgst, total: total,
     desc: desc, mode: mode,
     pdf_source: pdf.source,
+    pdf_file: pdf.file || '',
+    pdf_folder: pdf.folderUrl || '',
     pdf_name: custName.replace(/[\\\/:*?"<>|]+/g, '_').replace(/\s+/g, '_') + '_BILL.pdf',
     pdf_base64: Utilities.base64Encode(pdfBlob.getBytes())
   };
 }
 
-/* -------------------------------------------------------------------- make_pdf */
+/* ------------------------------------------- customer-doc billing (Drive) ---
+ *
+ * Each customer has ONE Google Doc (in the shared Gst_bills folder). Billing
+ * edits that doc IN PLACE — the previous bill's values (reconstructed from
+ * GST RECORDS + the Duration column) are replaced with the new bill's — then
+ * the doc is exported to PDF and archived under BILLS/<Customer>/ on Drive.
+ * The sheet is updated only after the PDF is safely archived.
+ * -------------------------------------------------------------------------- */
 
-/**
- * Regenerates the bill PDF for an invoice that already exists in GST
- * RECORDS. No sheet writes, no Drive — the PDF is built in memory from the
- * stored row and returned as base64 (the phone saves it locally).
- * Period start/end are reconstructed from the customer's CURRENT expire
- * date (= that bill's period end) minus the stored Duration.
+function sanitizeFile_(s) {
+  return String(s).replace(/[\\\/:*?"<>|]+/g, '_').replace(/\s+/g, '_');
+}
+
+/** The Gst_bills folder (source docs). */
+function docsFolder_() {
+  var id = PROPS.getProperty('DOCS_FOLDER_ID');
+  if (!id) throw new Error('DOCS_FOLDER_ID not set — register the Gst_bills folder id first (test_backend.py folder)');
+  return DriveApp.getFolderById(id);
+}
+
+/** Root folder for archived PDFs: prop PDFS_FOLDER_ID, or "BILLS" inside the
+ *  Gst_bills folder (auto-created on first use). */
+function pdfsRoot_() {
+  var id = PROPS.getProperty('PDFS_FOLDER_ID');
+  if (id) return DriveApp.getFolderById(id);
+  var docs = docsFolder_();
+  var it = docs.getFoldersByName('BILLS');
+  return it.hasNext() ? it.next() : docs.createFolder('BILLS');
+}
+
+function customerFolder_(custName, create) {
+  var root = pdfsRoot_();
+  var it = root.getFoldersByName(sanitizeFile_(custName));
+  if (it.hasNext()) return it.next();
+  return create ? root.createFolder(sanitizeFile_(custName)) : null;
+}
+
+/** Doc id mapped to a customer (DOCS_MAP prop, built by syncDocs_). */
+function customerDocId_(custName) {
+  var raw = PROPS.getProperty('DOCS_MAP');
+  if (!raw) return '';
+  try {
+    var m = JSON.parse(raw);
+    return m[custName] || '';
+  } catch (e) { return ''; }
+}
+
+function saveDocsMap_(map) { PROPS.setProperty('DOCS_MAP', JSON.stringify(map)); }
+
+/* --------------------------------------------------------------- sync ----- */
+
+/** sync_docs: walk the docs folder recursively, fuzzy-match every Google Doc
+ *  to a UPCOMING BILLS customer and store the mapping. Read-only for docs. */
+function syncDocs_(body) {
+  var ss = SpreadsheetApp.openById(SHEET_ID);
+  var up = ss.getSheetByName(UPCOMING_SHEET);
+  var upVals = up.getDataRange().getValues();
+  var iName = colOf_(upVals[0], 'Customer name');
+  var customers = [];
+  for (var r = 1; r < upVals.length; r++) {
+    var n = String(upVals[r][iName] || '').trim();
+    if (n) customers.push(n);
+  }
+  var files = [];
+  function walk(folder, path) {
+    var fit = folder.getFiles();
+    while (fit.hasNext()) {
+      var f = fit.next();
+      files.push({ name: f.getName(), id: f.getId(), path: path,
+                   isGoogleDoc: f.getMimeType() === MimeType.GOOGLE_DOCS });
+    }
+    var dit = folder.getFolders();
+    while (dit.hasNext()) { var d = dit.next(); walk(d, path + d.getName() + '/'); }
+  }
+  walk(docsFolder_(), '');
+  var map = {}, report = [];
+  files.forEach(function (f) {
+    var best = null, bestScore = 0;
+    customers.forEach(function (c) {
+      var s = nameScore_(f.name.replace(/\.docx?$/i, ''), c);
+      if (s > bestScore) { bestScore = s; best = c; }
+    });
+    var entry = { doc: f.name, path: f.path, isGoogleDoc: f.isGoogleDoc,
+                  match: bestScore >= 0.8 ? best : '(no clear match)',
+                  score: Math.round(bestScore * 100) / 100 };
+    if (bestScore >= 0.8 && best) {
+      entry.status = f.isGoogleDoc ? 'mapped' : 'needs conversion (open as Google Doc)';
+      if (f.isGoogleDoc && !map[best]) map[best] = f.id;
+      else if (f.isGoogleDoc && map[best]) entry.status = 'duplicate match (first kept)';
+    } else {
+      entry.status = 'unmatched';
+    }
+    report.push(entry);
+  });
+  saveDocsMap_(map);
+  return { ok: true, docs_found: files.length, customers: customers.length,
+           mapped: Object.keys(map).length, map: map, report: report };
+}
+
+/** Doc id -> previous-bill value pairs for the in-place edit. Old values are
+ *  reconstructed the same way makePdf_ does: last GST record + the Duration
+ *  column (which still holds the last bill's duration) + the customer's
+ *  current Expire Date (= that bill's period end). */
+function docEditPairs_(last, oldExp, lastMonths, bill) {
+  var oldStart = (oldExp && lastMonths > 0) ? addDays_(addMonths_(oldExp, -lastMonths), 1) : null;
+  var oldPeriod = oldStart ? (fmtDMY_(oldStart) + ' to ' + fmtDMY_(oldExp)) : '';
+  var oldDate = String(last.invoiceDate || '').replace(/\//g, '-');   // docs print dd-mm-yy
+  var newDate = String(bill.invoiceDate || '').replace(/\//g, '-');
+  function words(n) { return rupeeWords_(n) + ' RUPEES ONLY/_'; }
+  return [
+    { name: 'Invoice No',   old: last.invoiceNo,  nw: bill.invoiceNo },
+    { name: 'Invoice Date', old: oldDate,         nw: newDate },
+    { name: 'Bill Period',  old: oldPeriod,       nw: bill.periodStart + ' to ' + bill.periodEnd },
+    { name: 'Amount',       old: money_(last.amount), nw: money_(bill.amount) },
+    { name: 'GST cells',    old: money_(last.cgst),   nw: money_(bill.cgst) },
+    { name: 'Total',        old: money_(last.total),  nw: money_(bill.total) },
+    { name: 'Words',        old: words(last.total),   nw: words(bill.total) },
+    { name: 'Description',  old: String(last.desc || ''), nw: String(bill.desc || ''), warn: true }
+  ];
+}
+
+/* ------------------------------------------------------- doc editing ------ */
+
+function escRegex_(s) {
+  return String(s).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+/** DocumentApp replaceText treats the pattern as regex and "$" in the
+ *  replacement as a capture reference — escape both sides' specials. */
+function replaceInDoc_(doc, oldv, newv) {
+  doc.getBody().replaceText(escRegex_(oldv), String(newv).replace(/\$/g, '$$$$'));
+}
+
+/** Best-effort description replacement: whole string first, then line-wise. */
+function replaceDesc_(doc, oldDesc, newDesc) {
+  if (!oldDesc || !newDesc || oldDesc === newDesc) return 'unchanged';
+  var body = doc.getBody();
+  var text = body.getText();
+  if (text.indexOf(oldDesc) >= 0) {
+    body.replaceText(escRegex_(oldDesc), String(newDesc).replace(/\$/g, '$$$$'));
+    return 'replaced';
+  }
+  var oldLines = oldDesc.split('\n').map(function (s) { return s.trim(); }).filter(Boolean);
+  var newLines = newDesc.split('\n').map(function (s) { return s.trim(); }).filter(Boolean);
+  if (!oldLines.length) return 'NOT FOUND — left unchanged';
+  if (oldLines.length === 1 && newLines.length > 1) {
+    // one paragraph in the doc, two-line description now — merge onto one line
+    if (text.indexOf(oldLines[0]) < 0) return 'NOT FOUND — left unchanged';
+    body.replaceText(escRegex_(oldLines[0]),
+                     String(newLines.join(' ')).replace(/\$/g, '$$$$'));
+    return 'replaced (merged to one line)';
+  }
+  var max = Math.max(oldLines.length, newLines.length);
+  var misses = [];
+  for (var i = 0; i < max; i++) {
+    var o = i < oldLines.length ? oldLines[i] : null;
+    var w = i < newLines.length ? newLines[i] : '';
+    if (o === null) continue;                       // extra new lines have no anchor
+    if (o === w) continue;
+    if (text.indexOf(o) < 0) { misses.push(o); continue; }
+    body.replaceText(escRegex_(o), String(w).replace(/\$/g, '$$$$'));
+  }
+  return misses.length ? 'partially replaced, not found: ' + misses.join(' | ')
+                       : 'replaced (line-wise)';
+}
+
+/** Applies old->new pairs to the customer doc IN PLACE, with verification.
+ *  - a pair whose "old" is absent but whose "new" is already present counts as
+ *    already updated (safe retry after a partial previous attempt)
+ *  - a critical pair missing entirely -> hard error, nothing changed
+ *  - after applying, every new value must be present in the doc or the edit
+ *    is reverted and an error thrown
+ *  Returns {edited: [..], skipped: [..]}.
  */
-function makePdf_(body) {
+function editCustomerDoc_(doc, pairs) {
+  var CRITICAL = ['Invoice No', 'Invoice Date', 'Bill Period',
+                  'Amount', 'GST cells', 'Total', 'Words'];
+  var body = doc.getBody();
+  var before = body.getText();
+  var applied = [], skipped = [], missing = [];
+
+  pairs.forEach(function (p) {
+    if (p.name === 'Description') return;           // handled separately below
+    if (!p.old || p.old === p.nw) { skipped.push(p.name + ' (unchanged)'); return; }
+    if (before.indexOf(p.old) >= 0) applied.push(p);
+    else if (before.indexOf(p.nw) >= 0) skipped.push(p.name + ' (already updated)');
+    else missing.push(p);
+  });
+
+  var critMissing = missing.filter(function (p) { return CRITICAL.indexOf(p.name) >= 0; });
+  if (critMissing.length) {
+    var allAlreadyNew = critMissing.every(function (p) { return before.indexOf(p.nw) >= 0; });
+    if (!allAlreadyNew) {
+      throw new Error('customer doc does not contain the previous bill — fields not found: ' +
+        critMissing.map(function (p) { return p.name + ' ("' + String(p.old).slice(0, 40) + '")'; }).join('; ') +
+        '. Open the doc and check it matches the last GST RECORDS entry, or rebuild it (rebuild_doc).');
+    }
+    // every critical pair is already updated in the doc — safe to continue
+    critMissing.forEach(function (p) { skipped.push(p.name + ' (already updated)'); });
+    missing = missing.filter(function (p) { return CRITICAL.indexOf(p.name) < 0; });
+  }
+  missing.forEach(function (p) { skipped.push(p.name + ' (not found — left unchanged)'); });
+
+  // longer values first so a shorter old value can never sit inside a longer one
+  applied.sort(function (a, b) { return String(b.old).length - String(a.old).length; });
+  applied.forEach(function (p) { replaceInDoc_(doc, p.old, p.nw); });
+
+  var descPair = pairs.filter(function (p) { return p.name === 'Description'; })[0];
+  var descResult = '';
+  if (descPair) descResult = replaceDesc_(doc, descPair.old, descPair.nw);
+
+  var after = body.getText();
+  var failures = applied.filter(function (p) { return after.indexOf(p.nw) < 0; });
+  if (failures.length) {
+    failures.forEach(function (p) {                 // best-effort revert
+      try { replaceInDoc_(doc, p.nw, p.old); } catch (e) { /* keep going */ }
+    });
+    throw new Error('doc edit verification failed for: ' +
+      failures.map(function (p) { return p.name; }).join('; ') + ' — edit reverted');
+  }
+  return { edited: applied.map(function (p) { return p.name; }),
+           skipped: skipped, desc: descResult };
+}
+
+/* ------------------------------------------------- export + archive ------- */
+
+/** Exports the doc to PDF and archives it under BILLS/<Customer>/. */
+function exportAndArchive_(doc, custName, invoiceNo, dateStr) {
+  var blob = doc.getAs('application/pdf');
+  var fname = sanitizeFile_(invoiceNo) + '_' + sanitizeFile_(dateStr) + '.pdf';
+  blob.setName(fname);
+  var folder = customerFolder_(custName, true);
+  folder.createFile(blob);
+  return { blob: blob, file: fname, folderUrl: folder.getUrl() };
+}
+
+/** The new bill pipeline: edit doc in place -> export -> archive. */
+function billViaCustomerDoc_(custName, last, oldExp, lastMonths, bill) {
+  var docId = customerDocId_(custName);
+  if (!docId) throw new Error('no Google Doc mapped for "' + custName +
+    '" — run test_backend.py docs (sync) and check_docs first');
+  var doc = DocumentApp.openById(docId);
+  var pairs = docEditPairs_(last, oldExp, lastMonths, bill);
+  var edit = editCustomerDoc_(doc, pairs);
+  var arch = exportAndArchive_(doc, custName, bill.invoiceNo,
+                               String(bill.invoiceDate || '').replace(/\//g, '-'));
+  return { blob: arch.blob, source: 'customer-doc', file: arch.file, folderUrl: arch.folderUrl,
+           edited: edit.edited, skipped: edit.skipped, desc: edit.desc };
+}
+
+/* --------------------------------------------------- doc health checks ---- */
+
+/** check_docs: for every customer, verify the mapped doc contains exactly the
+ *  values the last GST record says it should (read-only). */
+function checkDocs_(body) {
+  var ss = SpreadsheetApp.openById(SHEET_ID);
+  var up = ss.getSheetByName(UPCOMING_SHEET);
+  var gst = ss.getSheetByName(GST_SHEET);
+  var upVals = up.getDataRange().getValues();
+  var iName = colOf_(upVals[0], 'Customer name'), iExp = colOf_(upVals[0], 'Expire Date');
+  var iDur = colOf_(upVals[0], COL_DURATION);
+  var gstVals = gst.getDataRange().getValues();
+  var raw = PROPS.getProperty('DOCS_MAP') || '{}';
+  var map; try { map = JSON.parse(raw); } catch (e) { map = {}; }
+  var exportTest = body.export_test === true;
+  var out = [];
+  for (var r = 1; r < upVals.length; r++) {
+    var cust = String(upVals[r][iName] || '').trim();
+    if (!cust) continue;
+    var docId = map[cust] || '';
+    var entry = { customer: cust, doc_id: docId || '(not mapped)' };
+    if (!docId) { entry.status = 'NOT MAPPED'; out.push(entry); continue; }
+    try {
+      var doc = DocumentApp.openById(docId);
+      var text = doc.getBody().getText();
+      var last = findLastGstRecord_(gstVals, cust);
+      var expire = asDate_(upVals[r][iExp]);
+      var months = parseDuration_(iDur >= 0 ? String(upVals[r][iDur] || '') : '');
+      var end = expire, start = (end && months > 0) ? addDays_(addMonths_(end, -months), 1) : null;
+      var checks = {
+        'Invoice No':  last ? last.invoiceNo : '',
+        'Invoice Date': last ? String(last.invoiceDate || '').replace(/\//g, '-') : '',
+        'Bill Period': start ? (fmtDMY_(start) + ' to ' + fmtDMY_(end)) : '',
+        'Amount':      last ? money_(last.amount) : '',
+        'CGST/SGST':   last ? money_(last.cgst) : '',
+        'Total':       last ? money_(last.total) : '',
+        'Words':       last ? (rupeeWords_(last.total) + ' RUPEES ONLY/_') : ''
+      };
+      var missing = [];
+      for (var k in checks) {
+        if (checks[k] && text.indexOf(checks[k]) < 0) {
+          missing.push(k + ' ("' + String(checks[k]).slice(0, 30) + '")');
+        }
+      }
+      entry.lastInvoice = last ? last.invoiceNo : '(none in GST RECORDS)';
+      if (exportTest) entry.export_test = doc.getAs('application/pdf').getBytes().length + ' bytes';
+      entry.status = missing.length ? 'NEEDS ATTENTION — missing: ' + missing.join('; ') : 'OK';
+    } catch (e) {
+      entry.status = 'ERROR: ' + String(e && e.message || e).slice(0, 140);
+    }
+    out.push(entry);
+  }
+  return { ok: true, results: out };
+}
+
+/** rebuild_doc: recreate one customer's doc from the FIXED template
+ *  (GST_BILL_TEMPLATE.docx converted to a Google Doc), pre-filled with that
+ *  customer's LAST GST record, and map it. Use when a doc is broken/unusable. */
+function rebuildDoc_(body) {
+  var name = String(body.customer || '').trim();
+  if (!name) throw new Error('customer is required');
+  var tmplId = PROPS.getProperty('BILL_TEMPLATE_DOC_ID');
+  if (!tmplId) throw new Error('BILL_TEMPLATE_DOC_ID not set — upload the FIXED ' +
+    'GST_BILL_TEMPLATE.docx to the telecom Drive, open it as a Google Doc and register it first');
+  var ss = SpreadsheetApp.openById(SHEET_ID);
+  var up = ss.getSheetByName(UPCOMING_SHEET);
+  var gst = ss.getSheetByName(GST_SHEET);
+  var upVals = up.getDataRange().getValues();
+  var iName = colOf_(upVals[0], 'Customer name'), iExp = colOf_(upVals[0], 'Expire Date');
+  var iDur = colOf_(upVals[0], COL_DURATION), iAddr = colOf_(upVals[0], COL_ADDRESS);
+  var iUser = colOf_(upVals[0], COL_USERID);
+  var row = -1;
+  for (var r = 1; r < upVals.length; r++) {
+    if (String(upVals[r][iName] || '').trim().toLowerCase() === name.toLowerCase()) { row = r; break; }
+  }
+  if (row < 0) throw new Error('customer not found in UPCOMING BILLS: ' + name);
+  var custName = String(upVals[row][iName] || '').trim();
+  var expire = asDate_(upVals[row][iExp]);
+  var last = findLastGstRecord_(gst.getDataRange().getValues(), custName);
+  if (!last) throw new Error('no GST RECORDS entry for ' + custName + ' — cannot rebuild');
+  var months = parseDuration_(iDur >= 0 ? String(upVals[row][iDur] || '') : '');
+  var end = expire, start = (end && months > 0) ? addDays_(addMonths_(end, -months), 1) : null;
+
+  var bill = {
+    buyer: custName,
+    address: iAddr >= 0 ? String(upVals[row][iAddr] || '').trim() : '',
+    gstin: last.gstin,
+    userid: iUser >= 0 ? String(upVals[row][iUser] || '').trim() : '',
+    invoiceNo: last.invoiceNo,
+    invoiceDate: String(last.invoiceDate || '').replace(/\//g, '-'),
+    periodStart: start ? fmtDMY_(start) : '-',
+    periodEnd: end ? fmtDMY_(end) : '-',
+    desc: last.desc,
+    amount: last.amount, cgst: last.cgst, total: last.total
+  };
+  var vals = templateValues_(bill);
+  var copy = DriveApp.getFileById(tmplId).makeCopy(sanitizeFile_(custName), docsFolder_());
+  try {
+    var doc = DocumentApp.openById(copy.getId());
+    var b = doc.getBody();
+    for (var tok in vals) b.replaceText(tok, vals[tok]);
+    var text = b.getText();
+    var missing = [];
+    for (var tok2 in vals) {
+      if (String(tok2).slice(0, 2) === '{{' && text.indexOf(tok2) >= 0) missing.push(tok2);
+    }
+    if (missing.length) throw new Error('tokens not filled: ' + missing.join(', '));
+  } catch (err) {
+    try { copy.setTrashed(true); } catch (e) { /* keep going */ }
+    throw err;
+  }
+  var raw = PROPS.getProperty('DOCS_MAP') || '{}';
+  var map; try { map = JSON.parse(raw); } catch (e) { map = {}; }
+  map[custName] = copy.getId();
+  saveDocsMap_(map);
+  var pdfBytes = 0;
+  try { pdfBytes = DocumentApp.openById(copy.getId()).getAs('application/pdf').getBytes().length; } catch (e) {}
+  return { ok: true, customer: custName, doc_id: copy.getId(), doc_name: copy.getName(),
+           export_test: pdfBytes + ' bytes', mapped: true,
+           note: 'if an older doc with the same name exists in the folder, delete it to avoid confusion' };
+}
+
+/* --------------------------------------------------- archived PDF history - */
+
+/** list_pdfs: every archived PDF of one customer (newest first). */
+function listPdfs_(body) {
+  var cust = String(body.customer || '').trim();
+  if (!cust) throw new Error('customer is required');
+  var folder = customerFolder_(cust, false);
+  if (!folder) return { ok: true, customer: cust, files: [], folder_url: '' };
+  var files = [];
+  var it = folder.getFiles();
+  while (it.hasNext()) {
+    var f = it.next();
+    files.push({ name: f.getName(), id: f.getId(),
+                 size: f.getSize(), created: f.getDateCreated().getTime() });
+  }
+  files.sort(function (a, b) { return b.created - a.created; });
+  return { ok: true, customer: cust, folder_url: folder.getUrl(), files: files };
+}
+
+/** get_pdf: fetch one archived PDF by invoice number (history viewer). */
+function getPdf_(body) {
   var invNo = String(body.invoice_no || '').trim();
   if (!invNo) throw new Error('invoice_no is required');
-
   var ss = SpreadsheetApp.openById(SHEET_ID);
   var gst = ss.getSheetByName(GST_SHEET);
-  var up = ss.getSheetByName(UPCOMING_SHEET);
-  if (!gst || !up) throw new Error('tabs "' + UPCOMING_SHEET + '" / "' + GST_SHEET + '" not found');
-
   var vals = gst.getDataRange().getValues();
-  var gCols = {};
-  GST_COLUMNS.forEach(function (c) { gCols[c] = colOf_(vals[0], c); });
-
   var gRow = -1;
   for (var r = 1; r < vals.length; r++) {
     if (String(vals[r][0] || '').trim() === invNo) { gRow = r; break; }
   }
   if (gRow < 0) throw new Error('invoice not found in GST RECORDS: ' + invNo);
-
-  var customer = gCols['Customer Name'] >= 0 ? String(vals[gRow][gCols['Customer Name']] || '').trim() : '';
-  if (!customer) throw new Error('invoice row has no Customer Name: ' + invNo);
-
-  // buyer extras (address / user id) from UPCOMING BILLS by fuzzy name
-  var upVals = up.getDataRange().getValues();
-  var iName = colOf_(upVals[0], 'Customer name');
-  var iAddr = colOf_(upVals[0], COL_ADDRESS);
-  var iUser = colOf_(upVals[0], COL_USERID);
-  var iDur = colOf_(upVals[0], COL_DURATION);
-  var iExp = colOf_(upVals[0], 'Expire Date');
-  var address = '', userid = '', durationText = '', expire = null, best = 0;
-  for (var u = 1; u < upVals.length; u++) {
-    var s = nameScore_(customer, String(upVals[u][iName] || ''));
-    if (s > best) {
-      best = s;
-      address = iAddr >= 0 ? String(upVals[u][iAddr] || '').trim() : '';
-      userid = iUser >= 0 ? String(upVals[u][iUser] || '').trim() : '';
-      durationText = iDur >= 0 ? String(upVals[u][iDur] || '').trim() : '';
-      expire = iExp >= 0 ? asDate_(upVals[u][iExp]) : null;
-    }
+  var cust = String(vals[gRow][colOf_(vals[0], 'Customer Name')] || '').trim();
+  var folder = customerFolder_(cust, false);
+  if (!folder) throw new Error('no archived PDFs folder for ' + cust);
+  var prefix = sanitizeFile_(invNo);
+  var it = folder.getFiles(), found = null;
+  while (it.hasNext()) {
+    var f = it.next();
+    if (String(f.getName()).indexOf(prefix) === 0) { found = f; break; }
   }
+  if (!found) throw new Error('no archived PDF for ' + invNo +
+    ' in BILLS/' + sanitizeFile_(cust) +
+    ' — PDFs are archived to Drive from now on; older ones exist only on the PC');
+  return { ok: true, invoice_no: invNo, customer: cust,
+           pdf_name: found.getName(),
+           pdf_base64: Utilities.base64Encode(found.getBlob().getBytes()) };
+}
 
-  // reconstruct the bill period: current expire = that bill's period end
-  var months = parseDuration_(durationText);
-  var periodEnd = expire || null;
-  var periodStart = (periodEnd && months > 0) ? addDays_(addMonths_(periodEnd, -months), 1) : null;
+/* -------------------------------------------------------------------- make_pdf */
 
-  var bill = {
-    buyer: customer,
-    address: address,
-    gstin: gCols['Customer GSTIN'] >= 0 ? String(vals[gRow][gCols['Customer GSTIN']] || '').trim() : '',
-    userid: userid,
-    invoiceNo: invNo,
-    invoiceDate: gCols['Invoice Date'] >= 0 ? String(vals[gRow][gCols['Invoice Date']] || '').trim() : '',
-    periodStart: periodStart ? fmtDMY_(periodStart) : '-',
-    periodEnd: periodEnd ? fmtDMY_(periodEnd) : '-',
-    desc: gCols['Service Description'] >= 0 ? String(vals[gRow][gCols['Service Description']] || '').trim() : '',
-    amount: num_(vals[gRow][gCols['Amount ₹']]),
-    cgst: num_(vals[gRow][gCols['CGST 9% (₹)']]),
-    sgst: num_(vals[gRow][gCols['SGST 9% (₹)']]),
-    total: num_(vals[gRow][gCols['Total Amount (₹)']]),
-    mode: gCols['Payment Mode'] >= 0 ? String(vals[gRow][gCols['Payment Mode']] || '').trim() : ''
-  };
-  var pdf = renderBillPdf_(bill);
-
-  return {
-    ok: true,
-    invoice_no: invNo,
-    customer: customer,
-    pdf_source: pdf.source,
-    pdf_name: customer.replace(/[\\\/:*?"<>|]+/g, '_').replace(/\s+/g, '_') + '_BILL.pdf',
-    pdf_base64: Utilities.base64Encode(pdf.blob.getBytes())
-  };
+/**
+ * Returns the ARCHIVED PDF for an invoice (from BILLS/<Customer>/ on Drive).
+ * No sheet writes, no regeneration — the customer docs always hold the
+ * LATEST bill, so old invoices come from the archive.
+ */
+function makePdf_(body) {
+  var invNo = String(body.invoice_no || '').trim();
+  if (!invNo) throw new Error('invoice_no is required');
+  var ss = SpreadsheetApp.openById(SHEET_ID);
+  var gst = ss.getSheetByName(GST_SHEET);
+  var vals = gst.getDataRange().getValues();
+  var gRow = -1;
+  for (var r = 1; r < vals.length; r++) {
+    if (String(vals[r][0] || '').trim() === invNo) { gRow = r; break; }
+  }
+  if (gRow < 0) throw new Error('invoice not found in GST RECORDS: ' + invNo);
+  var cust = String(vals[gRow][colOf_(vals[0], 'Customer Name')] || '').trim();
+  var folder = customerFolder_(cust, false);
+  if (!folder) throw new Error('no archived PDFs folder for ' + cust);
+  var prefix = sanitizeFile_(invNo);
+  var it = folder.getFiles(), found = null;
+  while (it.hasNext()) {
+    var f = it.next();
+    if (String(f.getName()).indexOf(prefix) === 0) { found = f; break; }
+  }
+  if (!found) throw new Error('no archived PDF for ' + invNo +
+    ' in BILLS/' + sanitizeFile_(cust) +
+    ' — bills are archived from now on; older PDFs exist only on the PC');
+  return { ok: true, invoice_no: invNo, customer: cust,
+           pdf_name: found.getName(),
+           pdf_base64: Utilities.base64Encode(found.getBlob().getBytes()) };
 }
 
 /* ------------------------------------------------------------- pdf template */

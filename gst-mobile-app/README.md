@@ -16,6 +16,18 @@ gst-mobile-app\
 
 ## What the app does
 
+**Billing (customer-doc flow, v2):** each customer has ONE Google Doc (in the
+`Gst_bills` folder on the telecom Drive). Billing **edits that doc in place**
+— the previous bill's values are replaced with the new ones — then the PDF is
+exported and **archived on Drive** under `BILLS/<Customer>/`. Only after the
+PDF is safely archived does the app update the Google Sheet (advance expiry,
+append the GST row). The phone keeps no copies: invoices are streamed from
+Drive, viewable, shareable (**WhatsApp via the Android share sheet**) and
+downloadable.
+
+**Invoice history:** the customer page lists every invoice; tapping PDF
+fetches the archived copy from Drive.
+
 | Screen | What you see / do |
 |---|---|
 | **Home** | 🔴 bills **expiring today** (highlighted), overdue customers, next 7 days |
