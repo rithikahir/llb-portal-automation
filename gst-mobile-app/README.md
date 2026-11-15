@@ -103,21 +103,16 @@ the app, at the branch root). Enable Pages once:
 
 ### 5. Bill layout — template & customer docs (current setup)
 
-The backend edits **one Google Doc per customer in place** (Docs API), so the
-template and customer docs must be **true Google Docs** — Google refuses
-server-side edits on uploaded `.docx` files ("The document is inaccessible").
-Setup steps (already done; reference if ever rebuilding):
+The backend edits **one Google Doc per customer in place** (DocumentApp), so
+the template and customer docs must be **true Google Docs** — uploaded
+`.docx` files hard-abort on server-side edits ("The document is
+inaccessible"). Setup steps (already done; reference if ever rebuilding):
 
-1. `GST_BILL_TEMPLATE.docx` (regenerate with `python make_template.py`) is
-   converted to a **true Google Doc** automatically:
-
-   ```powershell
-   python gst-mobile-app\test_backend.py convert
-   ```
-
-   `convert_template` copies the uploaded `.docx` into a native Google Doc,
-   verifies a REST edit on a throwaway copy, and registers the new ID
-   (Script Property `BILL_TEMPLATE_DOC_ID`).
+1. The template is a **true Google Doc**: `GST_BILL_TEMPLATE.docx`
+   (regenerate with `python make_template.py`) was converted once with
+   File → Save as Google Docs, and the resulting doc's ID is registered
+   (Script Property `BILL_TEMPLATE_DOC_ID`). Registered ID:
+   `1BmPSzAeXy0VtH558gq-6UwSDis3WGgo03MzTk2f_xX8`.
 2. One customer doc per customer is created from the template with all
    `{{placeholders}}` filled from the customer's last GST record:
 
@@ -134,23 +129,21 @@ Setup steps (already done; reference if ever rebuilding):
    ```
 
 > How it works: billing replaces the previous bill's values in the customer's
-> doc **in place** (Docs API `replaceAllText`), exports the PDF and archives it
-> under `BILLS/<Customer>/` before touching the sheet. There are no per-bill
-> doc copies — the doc *is* the current bill, the archive holds the history.
+> doc **in place** (DocumentApp `replaceText`), exports the PDF and archives
+> it under `BILLS/<Customer>/` before touching the sheet. There are no
+> per-bill doc copies — the doc *is* the current bill, the archive holds the
+> history.
 
-### Editing engine & rollback
+### Editing engine
 
-All doc **text edits** go through the **Google Docs API `batchUpdate`**
-(plain HTTP — errors are catchable). Root cause of the old failures: uploaded
-`.docx` files abort on any server-side write, uncatchably. Rollback to the
-legacy DocumentApp path is instant, no redeploy:
+All doc edits use **pure Apps Script (`DocumentApp`)** — no external APIs.
+Rule of thumb: a doc that fails to edit with "The document is inaccessible"
+is in an Office-file state — never edit the `.docx` blob directly; re-create
+it from the Google Doc template with `rebuild_doc`.
 
-```powershell
-python gst-mobile-app\test_backend.py editmode documentapp   # legacy engine
-python gst-mobile-app\test_backend.py editmode rest          # Docs API (default)
-```
-
-Pre-migration backup: `gst-mobile-app\backups\Code_v3-pre-docsapi.js`.
+Engine history backups (for reference only):
+`gst-mobile-app\backups\` — `Code_v3-pre-docsapi.js` (original),
+`Code_v5-docsapi.js` (Docs API era), `appsscript_v5-docsapi.json`.
 
 ---
 
