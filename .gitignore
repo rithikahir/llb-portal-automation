@@ -1,17 +1,20 @@
 # secrets & session data — never commit
 .env
-renew_gate.json
-recharge_log.csv
-transfer_gate.json
-transfer_log.csv
+
+# all logs / runtime state live here (customer + partner data)
+logs/
 
 # business documents (GST bills)
 Shreeganesh_Telecom_GST_BILLS/
 Shreeganesh_Telecom_GST_BILLS_backup/
 
-# bill updater runtime data (customer/business names)
+# bill updater runtime data (customer/business names) — legacy root locations
 bills_update_log.csv
 bills_state.json
+renew_gate.json
+recharge_log.csv
+transfer_gate.json
+transfer_log.csv
 
 # python build artefacts
 __pycache__/

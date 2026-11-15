@@ -14,11 +14,12 @@ Safety model (mirrors auto_renew.py):
   * resolves the target from the LIVE dropdown; refuses ambiguity
   * sanity checks: amount > 0, amount <= current balance
   * double-transfer gate: transfer_gate.json "attempted" marker written
+    (in the logs folder) before the POST is ever sent
     BEFORE the POST + live Balance Transfer History same-day check
   * submit exactly ONCE: no retry after timeout/error (outcome UNKNOWN ->
     verify the report manually; the gate then blocks re-runs)
   * verify on the portal's own ledger (Balance Transfer History, Self scope)
-    and only log to transfer_log.csv on CONFIRMED success
+    and only log to transfer_log.csv (in the logs folder) on CONFIRMED success
 
 Windows quirk (same as auto_renew.py): run with  `python <script> <flags>`;
 never `.\transfer_balance.py` (.py is associated with an Electron app here).
@@ -44,8 +45,22 @@ URL_TRANSFER = f"{BASE}/Partner/TransferBalance.aspx"
 URL_HIST = f"{BASE}/Partner/BalTransHist.aspx"
 
 SCRIPT_DIR = Path(__file__).resolve().parent
-GATE_FILE = SCRIPT_DIR / "transfer_gate.json"
-LOG_FILE = SCRIPT_DIR / "transfer_log.csv"
+# every log/state file lives in the logs\ folder next to this script;
+# files from older versions (kept in the project root) are moved there once
+LOGS_DIR = SCRIPT_DIR / "logs"
+LOGS_DIR.mkdir(parents=True, exist_ok=True)
+
+
+def _into_logs(name: str) -> Path:
+    old = SCRIPT_DIR / name
+    new = LOGS_DIR / name
+    if old.exists() and not new.exists():
+        old.replace(new)                     # keep gate markers / history intact
+    return new
+
+
+GATE_FILE = _into_logs("transfer_gate.json")
+LOG_FILE = _into_logs("transfer_log.csv")
 
 # entity-level dropdown values (verified live; options are re-checked each run)
 LEVEL_OPTIONS = {"sub": "22602", "lco": "22603"}
@@ -224,7 +239,7 @@ def gate_load() -> list[dict]:
             data = json.loads(GATE_FILE.read_text(encoding="utf-8"))
             return data.get("records", [])
         except Exception:
-            print("[warn] transfer_gate.json unreadable — treating as empty", file=sys.stderr)
+            print("[warn] logs\\transfer_gate.json unreadable — treating as empty", file=sys.stderr)
             return []
     return []
 
@@ -239,7 +254,7 @@ def gate_check(records: list[dict], partner_id: int, amount: float) -> str | Non
         if rec.get("outcome") in ("attempted", "unknown"):
             return (f"previous transfer to partner {rec.get('partner_id')} on {rec.get('ts')} "
                     f"is still '{rec.get('outcome')}' — verify the Balance Transfer History "
-                    f"report, then either edit transfer_gate.json or use --bypass-gate")
+                    f"report, then either edit logs\\transfer_gate.json or use --bypass-gate")
         if (rec.get("outcome") == "confirmed" and rec.get("partner_id") == partner_id
                 and abs(float(rec.get("amount", 0)) - amount) < 0.005
                 and rec.get("date_iso") == today):
@@ -556,7 +571,7 @@ def main() -> None:
     except requests.RequestException as e:
         log(f"[submit] connection problem: {e.__class__.__name__}: {e}")
         log("[submit] OUTCOME UNKNOWN — do NOT re-run; verify the Balance Transfer "
-            "History report, then resolve transfer_gate.json manually (--bypass-gate after)")
+            "History report, then resolve logs\\transfer_gate.json manually (--bypass-gate after)")
         sys.exit(3)
 
     if status != 200:

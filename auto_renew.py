@@ -21,7 +21,7 @@ SAFETY RULES (the vendor API is NOT idempotent):
   * Shows a summary and asks for confirmation (skip with --force).
   * Aborts BEFORE submitting if the data doesn't look sane or the partner
     balance cannot cover the cost.
-  * ANTI-DOUBLE-RECHARGE GATE: a marker (renew_gate.json, next to this script)
+  * ANTI-DOUBLE-RECHARGE GATE: a marker (logs\renew_gate.json)
     records "attempted" BEFORE the POST fires; an unconfirmed attempt, or a
     successful recharge for the same customer on the same day, blocks any new
     run (exit 4). Additionally the Recent Purchase/Renew Report is checked
@@ -130,7 +130,21 @@ def first_option(html: str, sel_id: str) -> str:
 
 
 # ------------------------------------------------------------------ anti-double-recharge gate
-GATE_FILE = Path(__file__).resolve().parent / "renew_gate.json"
+# every log/state file lives in the logs\ folder next to this script;
+# files from older versions (kept in the project root) are moved there once
+LOGS_DIR = Path(__file__).resolve().parent / "logs"
+LOGS_DIR.mkdir(parents=True, exist_ok=True)
+
+
+def _into_logs(name: str) -> Path:
+    old = Path(__file__).resolve().parent / name
+    new = LOGS_DIR / name
+    if old.exists() and not new.exists():
+        old.replace(new)                     # keep gate markers / history intact
+    return new
+
+
+GATE_FILE = _into_logs("renew_gate.json")
 
 
 def gate_load() -> list[dict]:
@@ -209,7 +223,7 @@ def report_recharged_today(portal: Portal, username: str, today: str) -> str | N
 
 
 # ------------------------------------------------------------------ recharge log (limited fields only)
-RECHARGE_LOG = Path(__file__).resolve().parent / "recharge_log.csv"
+RECHARGE_LOG = _into_logs("recharge_log.csv")
 LOG_FIELDS = ["customer_id", "customer_name", "recharge_date", "activation_date", "expiry_date"]
 
 
@@ -547,7 +561,7 @@ def main() -> int:
         act.group(1) if act else model.get("ActivationDate", ""),
         exp.group(1) if exp else model.get("NewExpirayDateString", ""),
     )
-    print(f"[{step}] LOG: recharge recorded in recharge_log.csv "
+    print(f"[{step}] LOG: recharge recorded in logs\\recharge_log.csv "
           "(customer name/id, recharge date, activation date, expiry date)")
 
     # --- 5. verify on the recent purchase report (independent authority) ----
