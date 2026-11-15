@@ -1,0 +1,206 @@
+/* GST Bill Manager — mobile-first styles */
+:root {
+  --bg: #f1f3f9;
+  --card: #ffffff;
+  --ink: #171a2b;
+  --muted: #6b7280;
+  --accent: #4338ca;
+  --accent-soft: #eef2ff;
+  --danger: #b91c1c;
+  --danger-soft: #fee2e2;
+  --warn: #b45309;
+  --warn-soft: #fef3c7;
+  --ok: #15803d;
+  --ok-soft: #dcfce7;
+  --border: #e5e7eb;
+  --nav-h: 62px;
+  --radius: 14px;
+}
+* { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+html, body { margin: 0; padding: 0; }
+body {
+  background: var(--bg);
+  color: var(--ink);
+  font: 15px/1.45 -apple-system, "Segoe UI", Roboto, Arial, sans-serif;
+  min-height: 100vh;
+  padding-bottom: calc(var(--nav-h) + env(safe-area-inset-bottom));
+}
+#app { max-width: 560px; margin: 0 auto; }
+
+/* ---------- header ---------- */
+.hdr {
+  position: sticky; top: 0; z-index: 30;
+  background: linear-gradient(135deg, #1e1b4b, #312e81);
+  color: #fff; padding: 14px 16px 12px;
+  border-radius: 0 0 18px 18px;
+  box-shadow: 0 2px 10px rgba(30,27,75,.25);
+}
+.hdr-row { display: flex; align-items: center; gap: 10px; }
+.hdr h1 { font-size: 18px; margin: 0; flex: 1; font-weight: 700; letter-spacing: .2px; }
+.hdr .sub { font-size: 12px; opacity: .75; margin-top: 2px; }
+.iconbtn {
+  background: rgba(255,255,255,.14); border: 0; color: #fff;
+  width: 38px; height: 38px; border-radius: 12px; font-size: 17px;
+  display: inline-flex; align-items: center; justify-content: center; cursor: pointer;
+}
+.iconbtn:active { background: rgba(255,255,255,.3); }
+.iconbtn.spin svg { animation: spin 1s linear infinite; }
+@keyframes spin { to { transform: rotate(360deg); } }
+
+/* ---------- cards & lists ---------- */
+.wrap { padding: 14px 14px 10px; }
+.card {
+  background: var(--card); border: 1px solid var(--border);
+  border-radius: var(--radius); padding: 14px; margin-bottom: 12px;
+  box-shadow: 0 1px 3px rgba(17,24,39,.05);
+}
+.card.tap { cursor: pointer; }
+.card.tap:active { background: #fafbff; }
+.section-title {
+  font-size: 13px; font-weight: 700; color: var(--muted);
+  text-transform: uppercase; letter-spacing: .8px;
+  margin: 16px 4px 8px;
+}
+.cust-name { font-weight: 700; font-size: 15.5px; margin: 0 0 4px; word-break: break-word; }
+.meta-line { color: var(--muted); font-size: 13px; }
+.row-flex { display: flex; align-items: center; gap: 10px; }
+.grow { flex: 1; min-width: 0; }
+.right { text-align: right; white-space: nowrap; }
+.amount { font-weight: 800; font-size: 15px; color: var(--ink); }
+.small { font-size: 12px; color: var(--muted); }
+
+/* ---------- chips / badges ---------- */
+.chip {
+  display: inline-block; font-size: 11.5px; font-weight: 700;
+  padding: 3px 9px; border-radius: 999px; white-space: nowrap;
+}
+.chip.red   { background: var(--danger-soft); color: var(--danger); }
+.chip.amber { background: var(--warn-soft);  color: var(--warn); }
+.chip.green { background: var(--ok-soft);    color: var(--ok); }
+.chip.grey  { background: #e5e7eb;           color: #374151; }
+.chip.blue  { background: var(--accent-soft); color: var(--accent); }
+
+/* ---------- buttons ---------- */
+.btn {
+  display: inline-flex; align-items: center; justify-content: center; gap: 7px;
+  border: 0; border-radius: 12px; padding: 11px 16px;
+  font-size: 14.5px; font-weight: 700; cursor: pointer;
+  background: var(--accent-soft); color: var(--accent);
+}
+.btn:active { filter: brightness(.92); }
+.btn.primary { background: var(--accent); color: #fff; width: 100%; padding: 14px; font-size: 15.5px; }
+.btn.danger-soft { background: var(--danger-soft); color: var(--danger); }
+.btn.small { padding: 8px 12px; font-size: 13px; border-radius: 10px; }
+.btn.block { width: 100%; }
+.btn[disabled] { opacity: .55; pointer-events: none; }
+.btn-row { display: flex; gap: 10px; margin-top: 12px; }
+.btn-row .btn { flex: 1; }
+
+/* ---------- forms ---------- */
+.field { margin-bottom: 13px; }
+.field label { display: block; font-size: 12.5px; font-weight: 700; color: var(--muted); margin-bottom: 5px; }
+.field input, .field select, .field textarea {
+  width: 100%; padding: 12px; font-size: 15px; font-family: inherit;
+  border: 1.5px solid var(--border); border-radius: 11px; background: #fff; color: var(--ink);
+}
+.field textarea { resize: vertical; min-height: 64px; }
+.field input:focus, .field select:focus, .field textarea:focus {
+  outline: none; border-color: var(--accent);
+}
+.field input[type=number] { font-variant-numeric: tabular-nums; }
+.grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+
+/* ---------- summary box (bill preview) ---------- */
+.summary { background: var(--accent-soft); border-radius: 12px; padding: 12px 14px; margin-bottom: 13px; }
+.summary .line { display: flex; justify-content: space-between; padding: 3.5px 0; font-size: 14px; }
+.summary .line b.big { font-size: 17px; color: var(--accent); }
+
+/* ---------- invoice history ---------- */
+.inv {
+  display: flex; align-items: center; gap: 10px;
+  padding: 11px 2px; border-bottom: 1px solid var(--border);
+}
+.inv:last-child { border-bottom: 0; }
+.inv .no { font-weight: 700; font-size: 14px; }
+.inv .date { font-size: 12px; color: var(--muted); }
+.pdfbtn {
+  background: var(--danger-soft); color: var(--danger); border: 0;
+  border-radius: 9px; padding: 7px 11px; font-weight: 800; font-size: 12.5px; cursor: pointer;
+}
+.pdfbtn.off { background: #f3f4f6; color: #9ca3af; cursor: default; }
+
+/* ---------- bottom nav ---------- */
+.nav {
+  position: fixed; bottom: 0; left: 0; right: 0; z-index: 40;
+  background: #fff; border-top: 1px solid var(--border);
+  display: flex; justify-content: space-around;
+  padding-bottom: env(safe-area-inset-bottom);
+  max-width: 560px; margin: 0 auto;
+}
+.nav button {
+  flex: 1; border: 0; background: none; cursor: pointer;
+  padding: 9px 0 7px; color: var(--muted); font-size: 10.5px; font-weight: 600;
+  display: flex; flex-direction: column; align-items: center; gap: 2px;
+}
+.nav button .ni { font-size: 20px; line-height: 1; }
+.nav button.active { color: var(--accent); }
+.nav .nav-badge {
+  position: absolute; margin-top: -26px; margin-left: 20px;
+  background: var(--danger); color: #fff; font-size: 10px; font-weight: 800;
+  border-radius: 999px; padding: 1px 6px;
+}
+
+/* ---------- overlays ---------- */
+.overlay {
+  position: fixed; inset: 0; z-index: 50; background: var(--bg);
+  overflow-y: auto; -webkit-overflow-scrolling: touch;
+  max-width: 560px; margin: 0 auto;
+}
+.overlay .ohdr {
+  position: sticky; top: 0; z-index: 5;
+  background: linear-gradient(135deg, #1e1b4b, #312e81); color: #fff;
+  display: flex; align-items: center; gap: 10px;
+  padding: 12px 14px; padding-top: calc(12px + env(safe-area-inset-top));
+}
+.overlay .ohdr h2 { font-size: 16.5px; margin: 0; flex: 1; }
+.overlay .ohdr .back { background: rgba(255,255,255,.14); border: 0; color: #fff; width: 36px; height: 36px; border-radius: 10px; font-size: 18px; cursor: pointer; }
+
+/* ---------- pdf viewer ---------- */
+.pdf-frame { width: 100%; height: calc(100vh - 130px); border: 0; background: #525659; }
+.pdf-actions { display: flex; gap: 10px; padding: 12px 14px; }
+.pdf-actions .btn { flex: 1; }
+
+/* ---------- toast / busy ---------- */
+.toast {
+  position: fixed; left: 50%; bottom: calc(var(--nav-h) + 18px); transform: translateX(-50%) translateY(20px);
+  background: #111827; color: #fff; font-size: 13.5px; font-weight: 600;
+  padding: 11px 18px; border-radius: 999px; opacity: 0; pointer-events: none;
+  transition: all .25s; z-index: 99; max-width: 86vw; text-align: center;
+}
+.toast.show { opacity: 1; transform: translateX(-50%) translateY(0); }
+.toast.err { background: var(--danger); }
+.busy {
+  position: fixed; inset: 0; z-index: 90; background: rgba(17,24,39,.55);
+  display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 14px; color: #fff;
+}
+.busy .spinner { width: 44px; height: 44px; border: 4px solid rgba(255,255,255,.3); border-top-color: #fff; border-radius: 50%; animation: spin .9s linear infinite; }
+.busy .btxt { font-weight: 700; font-size: 15px; }
+.hidden { display: none !important; }
+
+/* ---------- search ---------- */
+.search { position: relative; margin-bottom: 12px; }
+.search input {
+  width: 100%; padding: 12px 14px 12px 40px; font-size: 15px;
+  border: 1.5px solid var(--border); border-radius: 12px; background: #fff;
+}
+.search .si { position: absolute; left: 13px; top: 50%; transform: translateY(-50%); color: var(--muted); }
+
+/* ---------- empty state ---------- */
+.empty { text-align: center; color: var(--muted); padding: 40px 20px; }
+.empty .big { font-size: 40px; margin-bottom: 8px; }
+
+/* offline banner */
+.banner {
+  background: var(--warn-soft); color: var(--warn); font-size: 12.5px; font-weight: 600;
+  padding: 8px 14px; text-align: center;
+}
