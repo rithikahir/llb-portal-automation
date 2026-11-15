@@ -98,7 +98,6 @@ function doPost(e) {
     if (body.action === 'rebuild_doc') return jsonOut_(rebuildDoc_(body));
     if (body.action === 'list_pdfs') return jsonOut_(listPdfs_(body));
     if (body.action === 'get_pdf') return jsonOut_(getPdf_(body));
-    if (body.action === 'convert_template') return jsonOut_(convertTemplate_(body));
     return jsonOut_({ ok: false, error: 'unknown action: ' + body.action });
   } catch (err) {
     return jsonOut_({ ok: false, error: String(err && err.message || err) });
@@ -107,7 +106,7 @@ function doPost(e) {
 
 /** Browser test that the web app is alive. */
 function doGet() {
-  return jsonOut_({ ok: true, service: 'gst-bill-automation v5 (Docs API edits)',
+  return jsonOut_({ ok: true, service: 'gst-bill-automation v6 (pure DocumentApp)',
                     actions: ['get_due', 'complete', 'set_props',
                               'ping', 'list_all', 'bill_customer', 'make_pdf',
                               'sync_docs', 'check_docs', 'rebuild_doc',
@@ -137,7 +136,7 @@ function setupSecrets() {
  */
 function setProps_(body) {
   var allowed = { SECRET: 1, SHEET_ID: 1, BILL_TEMPLATE_DOC_ID: 1,
-                  DOCS_FOLDER_ID: 1, PDFS_FOLDER_ID: 1, DOC_EDIT_MODE: 1 };
+                  DOCS_FOLDER_ID: 1, PDFS_FOLDER_ID: 1 };
   var set = [];
   var props = body.props || {};
   Object.keys(props).forEach(function (k) {
@@ -147,7 +146,7 @@ function setProps_(body) {
     PROPS.setProperty(k, v);
     set.push(k);
   });
-  if (!set.length) throw new Error('no valid properties to set (allowed: SECRET, SHEET_ID, BILL_TEMPLATE_DOC_ID, DOCS_FOLDER_ID, PDFS_FOLDER_ID, DOC_EDIT_MODE)');
+  if (!set.length) throw new Error('no valid properties to set (allowed: SECRET, SHEET_ID, BILL_TEMPLATE_DOC_ID, DOCS_FOLDER_ID, PDFS_FOLDER_ID)');
   if (set.indexOf('SECRET') >= 0) SECRET = PROPS.getProperty('SECRET');
   if (set.indexOf('SHEET_ID') >= 0) SHEET_ID = PROPS.getProperty('SHEET_ID');
   return { ok: true, set: set };
@@ -871,124 +870,31 @@ function escRegex_(s) {
 }
 
 /* ---------------------------------------------------------------------------
- * ROOT CAUSE of the editing failure (established 15/11/2026, test matrix):
- * Docs created by Drive's docx -> Google Docs conversion are READ-OK (open,
- * getText, PDF export all fine) but ANY WRITE through DocumentApp hard-aborts
- * the whole web-app execution with "The document is inaccessible. Please try
- * again later." — an error try/catch CANNOT contain (the HTTP response never
- * returns). Writes on Google-born docs work fine; saveAndClose/reopen and
- * pattern escaping change nothing. Conclusion: the docx import leaves content
- * the Docs text-write service cannot re-render; reads/exports never trigger
- * that code path.
+ * Editing engine: pure Apps Script (DocumentApp). No Docs API, no REST calls
+ * for editing.
  *
- * FIX: every TEXT EDIT now goes through the Docs API batchUpdate endpoint
- * (plain HTTP) — failures arrive as normal, catchable error responses instead
- * of aborting the script. Post-edit verification reads use the Docs API
- * documents.get as well. DocumentApp remains for reads/exports only.
+ * HISTORY: uploaded .docx files hard-abort on ANY server-side write
+ * ("The document is inaccessible") — that was the failure we chased. The fix
+ * was to make every bill doc a TRUE Google Doc: the template was converted
+ * once (docx -> native doc) and every customer doc is a native copy of it.
+ * On native Google Docs the DocumentApp path is the proven, working engine,
+ * so all editing uses DocumentApp alone.
  *
- * ROLLBACK: POST set_props {"props": {"DOC_EDIT_MODE": "documentapp"}} routes
- * every edit back to the previous DocumentApp implementation instantly — no
- * redeploy, no re-paste. Default mode: "rest".
+ * RULE: if a doc ever fails to edit with "The document is inaccessible",
+ * it is an Office-file state — re-create it from the Google Doc template
+ * (rebuild_doc), never edit the .docx blob directly.
  * ------------------------------------------------------------------------- */
 
-/** Editing backend: "rest" (Docs API) or "documentapp" (legacy rollback). */
-function docEditMode_() {
-  return PROPS.getProperty('DOC_EDIT_MODE') === 'documentapp' ? 'documentapp' : 'rest';
-}
-
-/** Docs API batchUpdate — throws with Google's own HTTP status + message on
- *  failure (catchable, unlike DocumentApp write aborts). If the REST endpoint
- *  reports the API is not enabled on this project, retries via the advanced
- *  service (Docs.Documents), which enables the API through the manifest. */
-function restBatchUpdate_(docId, requests) {
-  var resp = UrlFetchApp.fetch('https://docs.googleapis.com/v1/documents/' +
-    docId + ':batchUpdate', {
-    method: 'post',
-    contentType: 'application/json',
-    payload: JSON.stringify({ requests: requests }),
-    headers: { Authorization: 'Bearer ' + ScriptApp.getOAuthToken() },
-    muteHttpExceptions: true
-  });
-  var code = resp.getResponseCode();
-  var body = resp.getContentText();
-  if (code === 200) return body ? JSON.parse(body) : {};
-  if (code === 403 && /has not been used in project|has not been enabled|disabled/i.test(body)) {
-    return Docs.Documents.batchUpdate({ requests: requests }, docId);
-  }
-  throw new Error('Docs API batchUpdate failed (HTTP ' + code + '): ' +
-    String(body).slice(0, 200));
-}
-
-/** Exact-text (literal, case-sensitive) replace-all via the Docs API.
- *  Returns the reported occurrence count, or undefined when the API doesn't
- *  report it (callers verify by read-back anyway). */
-function restReplaceText_(docId, oldText, newText) {
-  if (oldText === newText) return 0;
-  var out = restBatchUpdate_(docId, [{
-    replaceAllText: {
-      replaceText: String(newText),
-      containsText: { text: String(oldText), matchCase: true }
-    }
-  }]);
-  if (out && out.replies && out.replies.length && out.replies[0]) {
-    var r = out.replies[0];
-    for (var k in r) {
-      if (r[k] && typeof r[k] === 'object' && r[k].occurrencesChanged !== undefined) {
-        return r[k].occurrencesChanged;
-      }
-    }
-  }
-  return undefined;
-}
-
-/** Plain text of a doc via the Docs API documents.get — concatenates all
- *  textRun contents (no separators; adequate for indexOf verification).
- *  Falls back to the advanced service if the REST endpoint is disabled. */
-function docTextRest_(docId) {
-  var resp = UrlFetchApp.fetch('https://docs.googleapis.com/v1/documents/' + docId, {
-    headers: { Authorization: 'Bearer ' + ScriptApp.getOAuthToken() },
-    muteHttpExceptions: true
-  });
-  var code = resp.getResponseCode();
-  var d;
-  if (code === 200) {
-    d = JSON.parse(resp.getContentText());
-  } else if (code === 403 &&
-             /has not been used in project|has not been enabled|disabled/i.test(resp.getContentText())) {
-    d = Docs.Documents.get(docId);
-  } else {
-    throw new Error('Docs API get failed (HTTP ' + code + '): ' +
-      resp.getContentText().slice(0, 180));
-  }
-  var parts = [];
-  (function walk(node) {
-    if (Array.isArray(node)) { node.forEach(walk); return; }
-    if (node && typeof node === 'object') {
-      if (node.textRun && node.textRun.content != null) parts.push(node.textRun.content);
-      for (var k in node) if (k !== 'textRun') walk(node[k]);
-    }
-  })(d.body);
-  return parts.join('');
-}
-
-/** Full text of a doc for verification — Docs API read in rest mode (safe even
- *  for post-edit states), DocumentApp read in rollback mode. */
+/** Full text of a doc for verification — DocumentApp read. */
 function docText_(docId) {
-  if (docEditMode_() === 'rest') return docTextRest_(docId);
   return DocumentApp.openById(docId).getBody().getText();
 }
 
-/** One text replacement, routed by DOC_EDIT_MODE.
- *  rest:         Docs API replaceAllText (literal match, case-sensitive)
- *  documentapp:  legacy DocumentApp regex replace (previous behaviour) */
+/** One text replacement. DocumentApp.replaceText treats the pattern as regex
+ *  and "$" in the replacement as a capture reference — escape both sides. */
 function replaceTextInDoc_(docId, oldText, newText) {
-  if (docEditMode_() === 'documentapp') {
-    DocumentApp.openById(docId).getBody()
-      .replaceText(escRegex_(oldText), String(newText).replace(/\$/g, '$$$$'));
-    return 'documentapp';
-  }
-  var n = restReplaceText_(docId, oldText, newText);
-  return 'rest' + (n === undefined ? '' : ' x' + n);
+  DocumentApp.openById(docId).getBody()
+    .replaceText(escRegex_(oldText), String(newText).replace(/\$/g, '$$$$'));
 }
 
 /** Best-effort description replacement: whole string first, then line-wise. */
@@ -1237,29 +1143,19 @@ function rebuildDoc_(body) {
   var copyId = DriveApp.getFileById(tmplId).makeCopy(sanitizeFile_(custName),
                                                      docsFolder_()).getId();
   try {
-    if (docEditMode_() === 'rest') {
-      // ONE atomic batchUpdate — if any request fails, nothing is applied
-      restBatchUpdate_(copyId, toks.map(function (tok) {
-        return { replaceAllText: {
-          replaceText: String(vals[tok]),
-          containsText: { text: tok, matchCase: true }
-        } };
-      }));
-    } else {
-      // legacy rollback path: DocumentApp edit (works on Google-born docs)
-      Utilities.sleep(1500);                    // let the fresh copy settle
-      var doc = null, openErr = null;
-      for (var att = 0; att < 3 && !doc; att++) {
-        try { doc = DocumentApp.openById(copyId); }
-        catch (e) { openErr = e; Utilities.sleep(2500); }
-      }
-      if (!doc) throw new Error('cannot open the new copy: ' +
-        String(openErr && openErr.message || openErr));
-      var b = doc.getBody();
-      for (var tok in vals) {
-        b.replaceText(escRegex_(tok), String(vals[tok]).replace(/\$/g, '$$$$'));
-      }
+    Utilities.sleep(1500);                    // let the fresh copy settle
+    var doc = null, openErr = null;
+    for (var att = 0; att < 3 && !doc; att++) {
+      try { doc = DocumentApp.openById(copyId); }
+      catch (e) { openErr = e; Utilities.sleep(2500); }
     }
+    if (!doc) throw new Error('cannot open the new copy: ' +
+      String(openErr && openErr.message || openErr));
+    var b = doc.getBody();
+    for (var tok in vals) {
+      b.replaceText(escRegex_(tok), String(vals[tok]).replace(/\$/g, '$$$$'));
+    }
+    doc.saveAndClose();
     var text = docText_(copyId);
     var missing = toks.filter(function (tok) { return text.indexOf(tok) >= 0; });
     if (missing.length) throw new Error('tokens not filled: ' + missing.join(', '));
@@ -1275,7 +1171,6 @@ function rebuildDoc_(body) {
   try { pdfBytes = exportPdf_(copyId).getBytes().length; } catch (e) {}
   return { ok: true, customer: custName, doc_id: copyId,
            doc_name: DriveApp.getFileById(copyId).getName(),
-           edit_mode: docEditMode_(),
            export_test: pdfBytes + ' bytes', mapped: true,
            note: 'if an older doc with the same name exists in the folder, delete it to avoid confusion' };
 }
@@ -1554,79 +1449,6 @@ function testTemplateAccess() {
   Logger.log('template OK: "' + name + '"  body paragraphs: ' + body.getParagraphs().length);
 }
 
-/** convert_template: the registered BILL_TEMPLATE_DOC_ID may still be the
- *  uploaded .docx (an OFFICE file — Google refuses to edit those server-side;
- *  this was the root cause of every "document is inaccessible" abort).
- *  This action converts it to a TRUE Google Doc (Drive API copy with target
- *  mimeType), verifies a REST edit works on a throwaway copy, then registers
- *  the new ID. Idempotent: if the registered file is already a Google Doc it
- *  just runs the write test and re-registers. */
-function convertTemplate_(body) {
-  var srcId = String(body.doc_id || PROPS.getProperty('BILL_TEMPLATE_DOC_ID') || '').trim();
-  if (!srcId) throw new Error('no template id registered or given (doc_id)');
-  var src = DriveApp.getFileById(srcId);
-  var srcMime = src.getMimeType();
-  var out = { ok: true, old_id: srcId, old_mime: srcMime };
-
-  if (srcMime === MimeType.GOOGLE_DOCS) {
-    out.converted = false;
-    out.new_id = srcId;
-  } else {
-    // Drive API v3: copy with conversion to a native Google Doc
-    var resp = UrlFetchApp.fetch('https://www.googleapis.com/drive/v3/files/' + srcId +
-      '/copy?fields=id,name,mimeType', {
-      method: 'post',
-      contentType: 'application/json',
-      payload: JSON.stringify({
-        name: src.getName().replace(/\.docx$/i, '') + ' (Google Doc)',
-        mimeType: 'application/vnd.google-apps.document'
-      }),
-      headers: { Authorization: 'Bearer ' + ScriptApp.getOAuthToken() },
-      muteHttpExceptions: true
-    });
-    var code = resp.getResponseCode();
-    var txt = resp.getContentText();
-    if (code === 403 && /has not been used in project|has not been enabled|disabled/i.test(txt)) {
-      // advanced-service fallback (manifest enables the Drive API)
-      var adv = Drive.Files.copy({ name: src.getName().replace(/\.docx$/i, '') + ' (Google Doc)',
-                                   mimeType: 'application/vnd.google-apps.document' }, srcId);
-      out.new_id = adv.id;
-      out.new_name = adv.name;
-      out.new_mime = adv.mimeType;
-    } else if (code !== 200) {
-      throw new Error('Drive copy-conversion failed (HTTP ' + code + '): ' + txt.slice(0, 200));
-    } else {
-      var parsed = JSON.parse(txt);
-      out.new_id = parsed.id;
-      out.new_name = parsed.name;
-      out.new_mime = parsed.mimeType;
-    }
-    if (out.new_mime && out.new_mime !== 'application/vnd.google-apps.document') {
-      throw new Error('conversion did not produce a Google Doc (mime: ' + out.new_mime + ')');
-    }
-    try { DriveApp.getFileById(out.new_id).moveTo(docsFolder_()); } catch (e) { /* location is cosmetic */ }
-    out.converted = true;
-  }
-
-  // verify: REST write on a throwaway copy of the (new) template
-  Utilities.sleep(1500);
-  var testCopy = DriveApp.getFileById(out.new_id).makeCopy('convert-test-' + Date.now()).getId();
-  try {
-    restReplaceText_(testCopy, '{{BUYER}}', 'CONVERT WRITE TEST');
-    var text = docTextRest_(testCopy);
-    if (text.indexOf('CONVERT WRITE TEST') < 0) throw new Error('REST write did not apply');
-    out.write_test = 'OK (REST edit + REST read-back verified)';
-  } finally {
-    try { DriveApp.getFileById(testCopy).setTrashed(true); } catch (e2) { /* keep going */ }
-  }
-
-  // register + confirm the registration round-trips
-  PROPS.setProperty('BILL_TEMPLATE_DOC_ID', out.new_id);
-  out.registered = PROPS.getProperty('BILL_TEMPLATE_DOC_ID') === out.new_id;
-  out.note = 'export test comes with the first rebuild_doc run';
-  return out;
-}
-
 /** debug_rebuild: runs the rebuild_doc pipeline STEP BY STEP with timing and
  *  reports exactly which call fails. Creates + trashes one template copy.
  *  Params (for bisection — hard aborts lose the response, so vary per request):
@@ -1671,7 +1493,7 @@ function debugRebuild_(body) {
   }
   // --- copy-blocks test: template READ-ONLY -> copy body blocks into a fresh
   //     doc -> WRITE in the fresh doc. If this survives, rebuild = copy+fill. --
-  if (body.mode === 'copyblocks' || body.rest_test) {
+  if (body.mode === 'copyblocks') {
     if (body.mode === 'copyblocks') {
       step('copy blocks to fresh doc', function () {
         var tmpl = DocumentApp.openById(tmplId);            // read-only access
@@ -1690,13 +1512,13 @@ function debugRebuild_(body) {
                   if (el.getChild(j).getType() === DocumentApp.ElementType.INLINE_IMAGE) imgs++;
                 }
               }
-              dst.append(el);
+              dst.appendParagraph(el.asParagraph());
             } else if (t === DocumentApp.ElementType.TABLE) {
-              dst.append(el);
+              dst.appendTable(el.asTable());
             } else if (t === DocumentApp.ElementType.LIST_ITEM) {
-              dst.append(el);
+              dst.appendListItem(el.asListItem());
             } else if (t === DocumentApp.ElementType.HORIZONTAL_RULE) {
-              dst.append(el);
+              dst.appendHorizontalRule(el.asHorizontalRule());
             } else {
               dst.appendParagraph('');
             }
@@ -1713,39 +1535,10 @@ function debugRebuild_(body) {
         }
       });
     }
-    if (body.rest_test) {
-      // Docs API (REST) write test on a TEMPLATE COPY — pure HTTP, cannot
-      // hard-abort the script; reports Google's own response on failure.
-      step('REST write on template copy', function () {
-        var c = DriveApp.getFileById(tmplId).makeCopy('debug-rest-' + Date.now());
-        var cid = c.getId();
-        try {
-          var resp = UrlFetchApp.fetch(
-            'https://docs.googleapis.com/v1/documents/' + cid + ':batchUpdate', {
-            method: 'post',
-            contentType: 'application/json',
-            payload: JSON.stringify({ requests: [{
-              replaceAllText: {
-                replaceText: 'REST WRITE TEST',
-                containsText: { text: '{{BUYER}}', matchCase: true }
-              }
-            }]}),
-            headers: { Authorization: 'Bearer ' + ScriptApp.getOAuthToken() },
-            muteHttpExceptions: true
-          });
-          var code = resp.getResponseCode();
-          var bodyTxt = resp.getContentText().slice(0, 220);
-          if (code !== 200) throw new Error('HTTP ' + code + ': ' + bodyTxt);
-          return 'REST batchUpdate OK on template copy';
-        } finally {
-          try { DriveApp.getFileById(cid).setTrashed(true); } catch (e2) {}
-        }
-      });
-    }
     return { ok: true, customer: name, template_info: tmplInfo, debug: steps };
   }
   step('props', function () { return 'template: ' + tmplId + ', folder: ' + folderId +
-    ', edit mode: ' + docEditMode_(); });
+    ', engine: DocumentApp (pure Apps Script)'; });
   step('sheet', function () { return SpreadsheetApp.openById(SHEET_ID).getName(); });
   var cust = '';
   var last = null;
@@ -1801,24 +1594,18 @@ function debugRebuild_(body) {
     var keys = Object.keys(vals);
     var t0 = Date.now();
     var done = [];
-    if (docEditMode_() === 'documentapp') {
-      var d2 = DocumentApp.openById(copyId);       // legacy rollback path
-      var b = d2.getBody();
-      for (var i = 0; i < keys.length && i < upto; i++) {
-        b.replaceText(escRegex_(keys[i]), String(vals[keys[i]]).replace(/\$/g, '$$$$'));
-        done.push(keys[i]);
-      }
-    } else {
-      for (var i = 0; i < keys.length && i < upto; i++) {
-        restReplaceText_(copyId, keys[i], String(vals[keys[i]]));
-        done.push(keys[i]);
-      }
+    var d2 = DocumentApp.openById(copyId);
+    var b = d2.getBody();
+    for (var i = 0; i < keys.length && i < upto; i++) {
+      b.replaceText(escRegex_(keys[i]), String(vals[keys[i]]).replace(/\$/g, '$$$$'));
+      done.push(keys[i]);
     }
+    d2.saveAndClose();
     return (Date.now() - t0) + ' ms — replaced ' + done.length + '/' + keys.length +
       ' tokens (' + done.join(', ') + ')';
   });
   step('token check', function () {
-    var text = docTextRest_(copyId);               // REST read-back (post-edit)
+    var text = docText_(copyId);                   // DocumentApp read-back (post-edit)
     var left = [];
     for (var k in templateValues_({ buyer: '', gstin: '', invoiceNo: '', invoiceDate: '',
       periodStart: '', periodEnd: '', desc: '', amount: 0, cgst: 0, total: 0 })) {

@@ -69,8 +69,7 @@ def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("command", choices=["ping", "list", "pdf", "template",
                                         "folder", "docs", "checkdocs", "rebuild", "pdfs",
-                                        "editmode", "resttest", "copyblocks",
-                                        "debugrebuild", "convert"])
+                                        "copyblocks", "debugrebuild"])
     ap.add_argument("invoice_no", nargs="?", default="")
     ap.add_argument("--limit", type=int, default=0)
     ap.add_argument("--url", default="",
@@ -159,30 +158,8 @@ def main() -> None:
         print(f"\nOK: {ok}/{len(out['results'])}")
         return
 
-    if args.command == "convert":
-        out = call("convert_template", {"doc_id": args.invoice_no or ""},
-                   url_override=args.url)
-        if out.get("converted"):
-            print(f"converted: {out['old_id']} ({out['old_mime']}) -> {out['new_id']}")
-            print(f"new doc: {out.get('new_name')}  [{out.get('new_mime')}]")
-        else:
-            print(f"template was already a Google Doc: {out['new_id']}")
-        print(f"write test: {out.get('write_test')}")
-        print(f"registered: {out.get('registered')}")
-        return
-
-    if args.command == "editmode":
-        if not args.invoice_no or args.invoice_no.lower() not in ("rest", "documentapp"):
-            sys.exit('usage:  python test_backend.py editmode rest|documentapp'
-                     '   ("documentapp" = instant rollback to the old editing path)')
-        out = call("set_props", {"props": {"DOC_EDIT_MODE": args.invoice_no.lower()}},
-                   url_override=args.url)
-        print(f"doc edit mode set to '{args.invoice_no.lower()}' (set: {out.get('set')})")
-        return
-
-    if args.command in ("resttest", "copyblocks"):
-        extra = {"rest_test": True} if args.command == "resttest" else {"mode": "copyblocks"}
-        out = call("debug_rebuild", extra, url_override=args.url)
+    if args.command == "copyblocks":
+        out = call("debug_rebuild", {"mode": "copyblocks"}, url_override=args.url)
         for s in out["debug"]:
             tag = "OK  " if s["ok"] else "FAIL"
             detail = s.get("info", "") if s["ok"] else ("ERROR: " + s.get("error", ""))
