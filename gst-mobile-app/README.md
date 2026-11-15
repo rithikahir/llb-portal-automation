@@ -101,42 +101,56 @@ the app, at the branch root). Enable Pages once:
 3. Chrome menu (⋮) → **Add to Home screen** → it installs and opens
    fullscreen like a native app, works offline (cached UI + saved PDFs).
 
-### 5. Bill layout — use the real Word template (one-time, optional but recommended)
+### 5. Bill layout — template & customer docs (current setup)
 
-By default the phone bills use a built-in HTML layout. To make every bill
-**identical to the Word bills** (`HINDUSTAN_BILL.docx` layout), register the
-bill template once:
+The backend edits **one Google Doc per customer in place** (Docs API), so the
+template and customer docs must be **true Google Docs** — Google refuses
+server-side edits on uploaded `.docx` files ("The document is inaccessible").
+Setup steps (already done; reference if ever rebuilding):
 
-1. The template file is ready: `GST_BILL_TEMPLATE.docx` in this folder —
-   it is your real bill with `{{placeholders}}` baked in (same fonts, tables,
-   layout). Regenerate it any time with `python make_template.py`.
-2. Upload `GST_BILL_TEMPLATE.docx` to **Google Drive** (anywhere).
-3. Double-click it → **Open with → Google Docs** (this converts it while
-   keeping the layout). The URL now looks like
-   `https://docs.google.com/document/d/`**`DOCUMENT_ID`**`/edit` — copy the
-   long ID in the middle.
-4. Register it (read-only for the sheet, stores just the ID):
+1. `GST_BILL_TEMPLATE.docx` (regenerate with `python make_template.py`) is
+   converted to a **true Google Doc** automatically:
 
    ```powershell
-   python gst-mobile-app\test_backend.py template DOCUMENT_ID
+   python gst-mobile-app\test_backend.py convert
    ```
 
-5. One extra authorization: open the web app `/exec` URL once in a browser
-   **as the account that deployed it** and accept the new
-   *documents + drive* scopes when asked.
-6. Test:
+   `convert_template` copies the uploaded `.docx` into a native Google Doc,
+   verifies a REST edit on a throwaway copy, and registers the new ID
+   (Script Property `BILL_TEMPLATE_DOC_ID`).
+2. One customer doc per customer is created from the template with all
+   `{{placeholders}}` filled from the customer's last GST record:
 
    ```powershell
-   python gst-mobile-app\test_backend.py pdf ST/053/2026-27
+   python gst-mobile-app\test_backend.py rebuild "Customer Name"
    ```
 
-   The line `[source: word-template]` means bills now render exactly like the
-   Word documents. (`[source: html]` = no template registered yet.)
+   The doc lands in the `Gst_bills` folder and is mapped to the customer
+   (`DOCS_MAP`). Re-run `docs` (sync) afterwards to confirm `mapped`.
+3. Verify everything read-only (text match + PDF export per customer):
 
-> How it works: for every bill the backend makes a **throwaway copy** of the
-> template Google Doc, fills the placeholders, exports the PDF and **deletes
-> the copy in the same execution** — nothing bill-related is ever kept in
-> Drive, and the PDF is still created *before* the sheet is updated.
+   ```powershell
+   python gst-mobile-app\test_backend.py checkdocs
+   ```
+
+> How it works: billing replaces the previous bill's values in the customer's
+> doc **in place** (Docs API `replaceAllText`), exports the PDF and archives it
+> under `BILLS/<Customer>/` before touching the sheet. There are no per-bill
+> doc copies — the doc *is* the current bill, the archive holds the history.
+
+### Editing engine & rollback
+
+All doc **text edits** go through the **Google Docs API `batchUpdate`**
+(plain HTTP — errors are catchable). Root cause of the old failures: uploaded
+`.docx` files abort on any server-side write, uncatchably. Rollback to the
+legacy DocumentApp path is instant, no redeploy:
+
+```powershell
+python gst-mobile-app\test_backend.py editmode documentapp   # legacy engine
+python gst-mobile-app\test_backend.py editmode rest          # Docs API (default)
+```
+
+Pre-migration backup: `gst-mobile-app\backups\Code_v3-pre-docsapi.js`.
 
 ---
 
