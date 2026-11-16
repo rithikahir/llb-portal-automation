@@ -429,8 +429,15 @@ function renderCustomerDetail(app, params) {
   var bb = $('#billnow');
   if (bb) bb.onclick = function () { go(renderBillForm, { name: c.name }); };
   // every archived PDF lives on Drive — tapping opens it from there
-  $all('.pdfbtn[data-inv]').forEach(function (b) {
+  $all('.pdfbtn[data-inv]:not(.paybtn)').forEach(function (b) {
     b.onclick = function () { openPdfViewer(b.dataset.inv); };
+  });
+  // payment status editor — one per invoice row
+  $all('.paybtn[data-inv]').forEach(function (b) {
+    b.onclick = function () {
+      var inv = c.invoices.filter(function (x) { return x.invoice_no === b.dataset.inv; })[0];
+      if (inv) go(renderPaymentEdit, { c: c, inv: inv });
+    };
   });
 }
 function detailBody(c) {
@@ -462,13 +469,70 @@ function detailBody(c) {
         '<div class="date">' + statusChip(inv.status) +
         (inv.payment_date ? ' · paid ' + esc(inv.payment_date) : '') + '</div></div>' +
         '<div class="right"><div class="amount">' + money(inv.total) + '</div>' +
-        '<button class="pdfbtn" data-inv="' + esc(inv.invoice_no) + '">PDF 📄</button></div></div>';
+        '<button class="pdfbtn" data-inv="' + esc(inv.invoice_no) + '">PDF 📄</button>' +
+        '<button class="pdfbtn paybtn" data-inv="' + esc(inv.invoice_no) + '">💳 ' + esc(inv.status || '?') + '</button></div></div>';
     }).join('') + '</div>';
   }
   return '<div class="wrap">' + info + hist + '</div>';
 }
 
 /* --------------------------------------------------------------- BILLING */
+/* ------------------------------------------------- payment status editor */
+function renderPaymentEdit(app, params) {
+  var c = params.c, inv = params.inv;
+  var cur = (inv.status || 'Pending').toLowerCase() === 'paid' ? 'Paid' : 'Pending';
+  // prefill: existing payment date if parseable, else today (yyyy-mm-dd)
+  var preISO = '';
+  if (inv.payment_date) { var d = new Date(inv.payment_date);
+    if (!isNaN(d)) preISO = d.getFullYear() + '-' + pad2(d.getMonth() + 1) + '-' + pad2(d.getDate()); }
+  app.innerHTML =
+    '<div class="overlay"><div class="ohdr">' +
+    '<button class="back" id="bk">←</button><h2>💳 Payment · ' + esc(c.name) + '</h2></div>' +
+    '<div class="wrap">' +
+    '<div class="summary"><div class="line"><span>Invoice</span><b>' + esc(inv.invoice_no) + '</b></div>' +
+    '<div class="line"><span>Total</span><b>' + money(inv.total) + '</b></div>' +
+    '<div class="line"><span>Current status</span><b>' + esc(inv.status || '?') +
+    (inv.payment_date ? ' · ' + esc(inv.payment_date) : '') + '</b></div></div>' +
+    '<div class="card">' +
+    '<div class="field"><label>Payment status</label><select id="p_status">' +
+    '<option value="Paid"' + (cur === 'Paid' ? ' selected' : '') + '>Paid</option>' +
+    '<option value="Pending"' + (cur === 'Pending' ? ' selected' : '') + '>Pending</option>' +
+    '</select></div>' +
+    '<div class="field" id="p_datebox"><label>Payment date</label>' +
+    '<input id="p_date" type="date" value="' + (preISO || '') + '"></div>' +
+    '</div>' +
+    '<button class="btn primary" id="doPay">💾 Save to sheet</button>' +
+    '<div style="height:20px"></div></div></div>';
+
+  $('#bk').onclick = back;
+  var syncDate = function () {
+    $('#p_datebox').style.display = $('#p_status').value === 'Paid' ? 'block' : 'none';
+  };
+  $('#p_status').onchange = syncDate;
+  syncDate();
+  if (!preISO) $('#p_date').value = new Date().getFullYear() + '-' + pad2(new Date().getMonth() + 1) + '-' + pad2(new Date().getDate());
+
+  $('#doPay').onclick = function () {
+    var st = $('#p_status').value;
+    var pd = $('#p_date').value;
+    if (st === 'Paid' && !pd) { toast('Pick the payment date', true); return; }
+    busy(true, 'Updating sheet…');
+    api('update_payment', {
+      customer: c.name, invoice_no: inv.invoice_no,
+      payment_status: st, payment_date: pd
+    }).then(function (res) {
+      busy(false);
+      toast('Saved ✓ ' + res.invoice_no + ' → ' + res.payment_status +
+            (res.payment_date ? ' (' + res.payment_date + ')' : ''));
+      back();
+      refreshData(false);
+    }).catch(function (e) {
+      busy(false);
+      toast('Update failed: ' + e.message, true);
+    });
+  };
+}
+
 /* ------------------------------------------------------ onboarding (new) */
 function renderAddCustomer(app) {
   app.innerHTML =
@@ -498,12 +562,12 @@ function renderAddCustomer(app) {
     '<div class="field"><label>Bill period starts *</label>' +
     '<input id="a_start" type="date"></div>' +
     '<div class="field"><label>Plan description *</label>' +
-    '<input id="a_desc" value="Broadband rental"></div>' +
+    '<textarea id="a_desc">HIGH SPEED 100 MBPS\nTRULY UNLIMITED 12 MONTHS PLAN.</textarea></div>' +
     '<div class="grid2">' +
     '<div class="field"><label>GSTIN / UIN (optional — hidden if empty)</label><input id="a_gstin" placeholder="27ABCDE1234F1Z5"></div>' +
     '<div class="field"><label>User id *</label><input id="a_userid" placeholder="e.g. SHARMA01"></div>' +
     '</div>' +
-    '<div class="field"><label>Payment mode</label><input id="a_mode" value="Cash"></div>' +
+    '<div class="field"><label>Payment mode</label><input id="a_mode" value="Online"></div>' +
     '</div>' +
 
     '<div class="card"><div class="meta-line">📌 On confirm: invoice no is auto-assigned, the customer\'s <b>own Google Doc is created</b> (same layout as your other bills), the first bill PDF is archived on Drive under <b>BILLS/&lt;name&gt;</b>, a <b>GST RECORDS</b> row (Paid) is added, and the customer appears in <b>UPCOMING BILLS</b> with the new expiry.</div></div>' +
