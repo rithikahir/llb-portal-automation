@@ -1171,7 +1171,12 @@ function addCustomer_(body) {
   // --- the first bill (seed) -------------------------------------------------
   var today = startOfDay_(new Date());
   var periodStart = today;
-  var periodEnd = addDays_(addMonths_(today, months), -1);
+  var psRaw = String(body.period_start || '').trim();
+  if (/^\d{4}-\d{2}-\d{2}$/.test(psRaw)) {          // from <input type=date>
+    var q = psRaw.split('-');
+    periodStart = new Date(Number(q[0]), Number(q[1]) - 1, Number(q[2]));
+  }
+  var periodEnd = addDays_(addMonths_(periodStart, months), -1);
   var invoiceNo = nextInvoiceNo_(gstVals, today);
   var cgst = round2_(amount * 0.09), sgst = round2_(amount * 0.09);
   var total = round2_(amount + cgst + sgst);
@@ -1209,7 +1214,22 @@ function addCustomer_(body) {
     var userOld = locate_(donor.user);
     if (userOld) pairs.push({ name: 'User ID', old: userOld, nw: userid || '-', warn: true });
     var gstinOld = locate_(donor.last.gstin);
-    if (gstinOld) pairs.push({ name: 'GSTIN', old: gstinOld, nw: gstin, warn: true });
+    if (gstinOld && gstin) {
+      // customer HAS a GSTIN — swap the value, label stays
+      pairs.push({ name: 'GSTIN', old: gstinOld, nw: gstin, warn: true });
+    } else if (gstinOld) {
+      // customer has NO GSTIN / UIN — remove the whole GSTIN line (label + value)
+      var gi = docText.indexOf(gstinOld);
+      var lineStart = docText.lastIndexOf('\n', gi);
+      var lineEnd = docText.indexOf('\n', gi);
+      if (lineEnd < 0) lineEnd = docText.length;
+      var line = docText.substring(lineStart + 1, lineEnd).trim();
+      if (/GSTIN/i.test(line)) {
+        pairs.push({ name: 'GSTIN line', old: line, nw: '', warn: true });
+      } else {
+        pairs.push({ name: 'GSTIN', old: gstinOld, nw: '', warn: true });
+      }
+    }
     pairs.push({ name: 'Description', old: donor.last.desc, nw: desc, warn: true });
     var edit = editCustomerDoc_(copyId, pairs);
     if (docText_(copyId).toLowerCase().indexOf(name.toLowerCase()) < 0) {
