@@ -1412,26 +1412,34 @@ function repairDoc_(body) {
       if (!invM || !last) throw new Error('cannot read invoice no from doc or no GST record');
       entry.doc_invoice = invM[0];
       entry.latest_invoice = last.invoiceNo;
-      if (invM[0] === last.invoiceNo) { entry.status = 'already current'; out.push(entry); continue; }
 
       // the invoice the doc actually shows -> its GST row = the doc's true state
       var old = null;
-      for (var g = 1; g < gstVals.length; g++) {
-        if (String(gstVals[g][0] || '').trim() === invM[0]) {
-          old = { invoiceNo: invM[0],
-                  invoiceDate: String(gstVals[g][1] || '').trim(),
-                  customer: String(gstVals[g][2] || '').trim(),
-                  desc: String(gstVals[g][4] || '').trim(),
-                  amount: num_(gstVals[g][5]), cgst: num_(gstVals[g][6]),
-                  sgst: num_(gstVals[g][7]), total: num_(gstVals[g][8]) };
-          break;
+      if (invM[0] === last.invoiceNo) {
+        old = { invoiceNo: last.invoiceNo, invoiceDate: String(last.invoiceDate || ''),
+                customer: last.customer, desc: last.desc, amount: last.amount,
+                cgst: last.cgst, sgst: last.sgst, total: last.total };
+      } else {
+        for (var g = 1; g < gstVals.length; g++) {
+          if (String(gstVals[g][0] || '').trim() === invM[0]) {
+            old = { invoiceNo: invM[0],
+                    invoiceDate: String(gstVals[g][1] || '').trim(),
+                    customer: String(gstVals[g][2] || '').trim(),
+                    desc: String(gstVals[g][4] || '').trim(),
+                    amount: num_(gstVals[g][5]), cgst: num_(gstVals[g][6]),
+                    sgst: num_(gstVals[g][7]), total: num_(gstVals[g][8]) };
+            break;
+          }
         }
+        if (!old || !(old.total > 0)) throw new Error('doc shows invoice ' + invM[0] +
+          ' which has no GST RECORDS row — cannot derive its current values');
       }
-      if (!old || !(old.total > 0)) throw new Error('doc shows invoice ' + invM[0] +
-        ' which has no GST RECORDS row — cannot derive its current values');
 
-      // the doc's actual period line (first "d to d" match) overrides guesses
+      // the doc's ACTUAL period + words lines (their formatting may drift from
+      // what the engine computes) — used as the replacement source so the edit
+      // always finds its anchor
       var perM = text.match(/\d{2}\/\d{2}\/\d{4} to \d{2}\/\d{2}\/\d{4}/);
+      var wordM = text.match(/[A-Z][A-Z ,\-]*RUPEES ONLY[^\n]*/);
       var expire = asDate_(upVals[r][iExp]);
       var months = parseDuration_(iDur >= 0 ? String(upVals[r][iDur] || '') : '');
       if (!(months > 0)) throw new Error('no parseable Duration in UPCOMING BILLS');
@@ -1446,9 +1454,12 @@ function repairDoc_(body) {
       pairs.forEach(function (p) {
         if (p.name === 'Bill Period' && perM) p.old = perM[0];
         if (p.name === 'Invoice Date' && old.invoiceDate) p.old = String(old.invoiceDate).replace(/\//g, '-');
+        if (p.name === 'Words' && wordM) p.old = wordM[0];
       });
       var edit = editCustomerDoc_(docId, pairs);
-      entry.status = 'repaired ' + invM[0] + ' -> ' + last.invoiceNo;
+      entry.status = invM[0] === last.invoiceNo
+        ? (edit.edited && edit.edited.length ? 'polished: ' + edit.edited.join(', ') : 'already current')
+        : 'repaired ' + invM[0] + ' -> ' + last.invoiceNo;
       entry.edited = edit.edited; entry.skipped = edit.skipped;
     } catch (e) {
       entry.status = 'ERROR: ' + String(e && e.message || e).slice(0, 160);
