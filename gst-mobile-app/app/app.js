@@ -479,8 +479,12 @@ function renderAddCustomer(app) {
     '<div class="summary" id="sumbox"></div>' +
 
     '<div class="card">' +
-    '<div class="field"><label>Customer name *</label>' +
+    '<div class="field"><label>Customer name (printed on doc) *</label>' +
     '<input id="a_name" placeholder="e.g. Sharma Traders"></div>' +
+    '<div class="field"><label>Sheet record name (GST RECORDS "Customer Name")</label>' +
+    '<input id="a_sheetname" placeholder="same as doc name unless different" data-auto="1"></div>' +
+    '<div class="field"><label>Doc file name (in Drive)</label>' +
+    '<input id="a_docname" placeholder="same as doc name unless different" data-auto="1"></div>' +
     '<div class="field"><label>Address * (printed below the name)</label>' +
     '<textarea id="a_address" placeholder="Street, area, Pune - PIN"></textarea></div>' +
     '<div class="grid2">' +
@@ -509,6 +513,16 @@ function renderAddCustomer(app) {
     '</div></div>';
 
   $('#bk').onclick = back;
+  // the two derived name fields mirror the doc name until edited by hand
+  ['#a_sheetname', '#a_docname'].forEach(function (sel) {
+    $(sel).oninput = function () { this.dataset.auto = '0'; };
+  });
+  $('#a_name').oninput = function () {
+    ['#a_sheetname', '#a_docname'].forEach(function (sel) {
+      var el = $(sel);
+      if (el.dataset.auto === '1') el.value = this.value;
+    }.bind(this));
+  };
   var todayISO = function () {
     var d = new Date();
     return d.getFullYear() + '-' + pad2(d.getMonth() + 1) + '-' + pad2(d.getDate());
@@ -548,6 +562,8 @@ function renderAddCustomer(app) {
     busy(true, 'Creating customer… making their doc…');
     api('add_customer', {
       name: nm,
+      sheet_name: $('#a_sheetname').value.trim(),
+      doc_name: $('#a_docname').value.trim(),
       amount: amt,
       duration_months: m,
       period_start: $('#a_start').value,

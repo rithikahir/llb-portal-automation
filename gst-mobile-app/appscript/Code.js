@@ -1160,8 +1160,13 @@ function billViaCustomerDoc_(custName, last, oldExp, lastMonths, bill) {
  *  The sheet is written only after the doc + PDF succeeded; on any doc/parse
  *  failure the copy is trashed and nothing is saved. */
 function addCustomer_(body) {
-  var name = String(body.name || '').trim();
+  var name = String(body.name || '').trim();          // buyer name printed ON THE DOC
   if (!name) throw new Error('name is required');
+  // sheetName: the "Customer Name" recorded in GST RECORDS, used as the
+  // UPCOMING BILLS row and the doc-map key (defaults to the doc name).
+  // docName: the Google Doc FILE name (defaults to the doc name too).
+  var sheetName = String(body.sheet_name || '').trim() || name;
+  var docName = String(body.doc_name || '').trim() || sanitizeFile_(name);
   var months = parseInt(body.duration_months, 10);
   if (!(months > 0)) months = 1;
   var amount = parseFloat(body.amount);
@@ -1180,8 +1185,8 @@ function addCustomer_(body) {
   var iUser = colOf_(upVals[0], COL_USERID);
 
   for (var r = 1; r < upVals.length; r++) {
-    if (String(upVals[r][iName] || '').trim().toLowerCase() === name.toLowerCase()) {
-      throw new Error('customer already exists in UPCOMING BILLS: ' + name);
+    if (String(upVals[r][iName] || '').trim().toLowerCase() === sheetName.toLowerCase()) {
+      throw new Error('customer already exists in UPCOMING BILLS: ' + sheetName);
     }
   }
 
@@ -1242,7 +1247,7 @@ function addCustomer_(body) {
 
   // --- create the doc: copy the donor's, replace donor values -> new ---------
   var copyId = DriveApp.getFileById(map[donor.cust])
-    .makeCopy(sanitizeFile_(name), docsFolder_()).getId();
+    .makeCopy(docName, docsFolder_()).getId();
   try {
     Utilities.sleep(1500);                     // let the fresh copy settle
     var docText = docText_(copyId);            // donor state, pre-edit
@@ -1292,18 +1297,18 @@ function addCustomer_(body) {
   }
 
   // --- doc + PDF safe -> sheet ------------------------------------------------
-  map[name] = copyId;
+  map[sheetName] = copyId;
   saveDocsMap_(map);
   var gCols = {};
   GST_COLUMNS.forEach(function (cc) { gCols[cc] = colOf_(gstVals[0], cc); });
   appendGstRecord_(gst, gCols, {
-    invoiceNo: invoiceNo, invoiceDate: fmtShort_(today), customer: name,
+    invoiceNo: invoiceNo, invoiceDate: fmtShort_(today), customer: sheetName,
     gstin: gstin, desc: desc, amount: amount, cgst: cgst, sgst: sgst,
     total: total, mode: mode, payment_status: 'Paid'
   });
 
   var newRow = up.getLastRow() + 1;
-  up.getRange(newRow, iName + 1).setValue(name);
+  up.getRange(newRow, iName + 1).setValue(sheetName);
   var expCell = up.getRange(newRow, iExp + 1);
   expCell.setNumberFormat('dd/mm/yy');
   expCell.setValue(periodEnd);
@@ -1315,7 +1320,7 @@ function addCustomer_(body) {
   sortUpcomingByExpire_(up, iExp);
 
   return {
-    ok: true, customer: name,
+    ok: true, customer: sheetName, doc_name: docName,
     invoice_no: invoiceNo, invoice_date: fmtShort_(today),
     period: { start: fmtDMY_(periodStart), end: fmtDMY_(periodEnd) },
     new_expire: fmtDMY_(periodEnd),
@@ -1324,7 +1329,7 @@ function addCustomer_(body) {
     doc_id: copyId,
     pdf_source: 'customer-doc (new customer)',
     pdf_file: arch.file, pdf_folder: arch.folderUrl,
-    pdf_name: sanitizeFile_(name) + '_BILL.pdf',
+    pdf_name: sanitizeFile_(sheetName) + '_BILL.pdf',
     pdf_base64: Utilities.base64Encode(arch.blob.getBytes())
   };
 }
