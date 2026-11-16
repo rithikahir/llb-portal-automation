@@ -1408,7 +1408,7 @@ function repairDoc_(body) {
         }
       }
       if (!old || !(old.total > 0)) throw new Error('doc shows invoice ' + invM[0] +
-        ' which has no GST RECORDS row — cannot derive the doc\\'s current values');
+        ' which has no GST RECORDS row — cannot derive its current values');
 
       // the doc's actual period line (first "d to d" match) overrides guesses
       var perM = text.match(/\d{2}\/\d{2}\/\d{4} to \d{2}\/\d{2}\/\d{4}/);
