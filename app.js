@@ -601,6 +601,19 @@ function renderBillForm(app, params) {
     '<textarea id="f_address" placeholder="Street, area, Pune - PIN">' + esc(c.address || '') + '</textarea></div>' +
     '</div>' +
 
+    '<div class="card">' +
+    '<label style="display:flex;align-items:center;gap:8px;padding:4px 0"><input type="radio" name="ovmode" id="ov_off" checked style="width:18px;height:18px">' +
+    '<span>Invoice date = today</span></label>' +
+    '<label style="display:flex;align-items:center;gap:8px;padding:4px 0"><input type="radio" name="ovmode" id="ov_on" style="width:18px;height:18px">' +
+    '<span>Bill early — override invoice date</span></label>' +
+    '<div class="field" id="ov_box" style="display:none;margin-top:6px">' +
+    '<label>Invoice date (must be after expiry)</label>' +
+    '<input type="date" id="f_invdate" min="' + minISO + '">' +
+    '</div>' +
+    '</div>' +
+
+    '</div>' +
+
     '<div class="card"><div class="meta-line">📌 On confirm: next global invoice no is assigned, a row is added to <b>GST RECORDS</b> (Payment Pending), expiry moves to the new period end, the tab is re-sorted, and the bill <b>PDF is generated and saved on this phone</b> (no Drive copy).</div></div>' +
 
     '<button class="btn primary" id="doBill">🧾 Update Bill &amp; Advance Expiry</button>' +
@@ -608,6 +621,18 @@ function renderBillForm(app, params) {
     '</div></div>';
 
   $('#bk').onclick = back;
+  // expiry / invoice-date guard state
+  var expParts = (c.expire_iso || '').split('-');
+  var expD = expParts.length === 3 ? new Date(+expParts[0], +expParts[1] - 1, +expParts[2]) : null;
+  var minISO = '';
+  if (expD) { var m1 = new Date(expD); m1.setDate(m1.getDate() + 1);
+    minISO = m1.getFullYear() + '-' + pad2(m1.getMonth() + 1) + '-' + pad2(m1.getDate()); }
+  var today0 = new Date(); today0.setHours(0, 0, 0, 0);
+  var billable = expD && expD.getTime() < today0.getTime();   // expiry strictly before today
+  $('#ov_on').onchange = $('#ov_off').onchange = function () {
+    $('#ov_box').style.display = $('#ov_on').checked ? 'block' : 'none';
+    recalc();
+  };
   var recalc = function () {
     var m = parseInt($('#f_months').value, 10) || 12;
     var amt = parseFloat($('#f_amount').value) || 0;
@@ -620,18 +645,34 @@ function renderBillForm(app, params) {
       '<div class="line"><span>New expiry</span><b>' + (endISO ? isoToDMY(endISO) : '—') + '</b></div>' +
       '<div class="line"><span>Basic / CGST / SGST</span><b>' + money(amt) + ' / ' + money(cgst) + ' / ' + money(sgst) + '</b></div>' +
       '<div class="line"><span>Invoice total</span><b class="big">' + money(tot) + '</b></div>' +
-      '<div class="line"><span>Invoice no</span><b>auto (next in FY)</b></div>';
+      '<div class="line"><span>Invoice no</span><b>auto (next in FY)</b></div>' +
+      '<div class="line"><span>Invoice date</span><b>' + ($('#ov_on') && $('#ov_on').checked && $('#f_invdate').value ? isoToDMY($('#f_invdate').value) + ' (override)' : 'today') + '</b></div>';
   };
   function periodEndPlus1(iso) { var p = iso.split('-'); var d = new Date(+p[0], +p[1] - 1, +p[2]); d.setDate(d.getDate() + 1); return d.getFullYear() + '-' + pad2(d.getMonth() + 1) + '-' + pad2(d.getDate()); }
-  ['#f_months', '#f_amount'].forEach(function (s) { $(s).oninput = recalc; $(s).onchange = recalc; });
+  ['#f_months', '#f_amount', '#f_invdate'].forEach(function (s) { $(s).oninput = recalc; $(s).onchange = recalc; });
   recalc();
 
   $('#doBill').onclick = function () {
     var m = parseInt($('#f_months').value, 10) || 12;
     var amt = parseFloat($('#f_amount').value);
     if (!(amt > 0)) { toast('Enter a valid amount', true); return; }
+    // invoice-date guard: normal billing only after expiry; early billing
+    // requires the override radio + a date strictly after the expiry
+    var invDate = '';
+    if ($('#ov_on').checked) {
+      invDate = $('#f_invdate').value;
+      if (!invDate) { toast('Pick the override invoice date', true); return; }
+      var picked = new Date(invDate + 'T00:00:00');
+      if (expD && picked <= expD) {
+        toast('Invoice date must be AFTER the expiry ' + isoToDMY(c.expire_iso), true); return;
+      }
+    } else if (!billable) {
+      toast(c.name + ' is covered until ' + isoToDMY(c.expire_iso) +
+        ' — billable from ' + isoToDMY(minISO) + '. To bill early, use the override.', true);
+      return;
+    }
     var endISO = c.expire_iso ? periodEndISO(c.expire_iso, m) : null;
-    if (!confirm('Bill ' + c.name + '?\n\nInvoice: next number in FY\nAmount: ' + money(amt) + ' (+9% CGST + 9% SGST)\nNew expiry: ' + (endISO ? isoToDMY(endISO) : '?') + '\n\nThis updates the Google Sheet and generates the PDF.')) return;
+    if (!confirm('Bill ' + c.name + '?\n\nInvoice: next number in FY\nInvoice date: ' + (invDate ? isoToDMY(invDate) : 'today') + '\nAmount: ' + money(amt) + ' (+9% CGST + 9% SGST)\nNew expiry: ' + (endISO ? isoToDMY(endISO) : '?') + '\n\nThis updates the Google Sheet and generates the PDF.')) return;
     busy(true, 'Billing… generating PDF…');
     api('bill_customer', {
       customer: c.name,
@@ -640,7 +681,8 @@ function renderBillForm(app, params) {
       description: $('#f_desc').value.trim(),
       payment_mode: $('#f_mode').value.trim(),
       address: $('#f_address').value.trim(),
-      userid: $('#f_userid').value.trim()
+      userid: $('#f_userid').value.trim(),
+      invoice_date: invDate
     }).then(function (res) {
       busy(false);
       if (res.sheet_updated === false) {
