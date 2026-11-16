@@ -100,6 +100,7 @@ function doPost(e) {
     if (body.action === 'get_pdf') return jsonOut_(getPdf_(body));
     if (body.action === 'map_doc') return jsonOut_(mapDoc_(body));
     if (body.action === 'add_customer') return jsonOut_(addCustomer_(body));
+    if (body.action === 'repair_doc') return jsonOut_(repairDoc_(body));
     return jsonOut_({ ok: false, error: 'unknown action: ' + body.action });
   } catch (err) {
     return jsonOut_({ ok: false, error: String(err && err.message || err) });
@@ -113,6 +114,7 @@ function doGet() {
                               'ping', 'list_all', 'bill_customer', 'make_pdf',
                               'sync_docs', 'check_docs', 'rebuild_doc',
                               'list_pdfs', 'get_pdf', 'map_doc', 'add_customer',
+                    'repair_doc',
                               'debug_rebuild'] });
 }
 
@@ -1350,6 +1352,91 @@ function checkDocs_(body) {
     }
     out.push(entry);
   }
+  return { ok: true, results: out };
+}
+
+/** repair_doc: bring a customer's Google Doc back in sync with their LATEST
+ *  GST RECORDS entry. Needed for docs that missed edits during the era when
+ *  server-side doc writes failed: the doc still shows an OLDER invoice, so a
+ *  normal bill would fail (the engine looks for the last invoice's values).
+ *  Method (all read-only recon first):
+ *    1. read the doc, take its actual invoice no (ST/xxx/…)
+ *    2. find THAT invoice's GST record -> the doc's true current values
+ *    3. read the doc's actual period line ("dd/mm/yyyy to dd/mm/yyyy")
+ *    4. build old->new pairs (doc state -> latest record) and apply through
+ *       the normal verified engine (aborts, nothing saved, on any mismatch).
+ *  body: { customer: "..." } or { all: true } for every stale mapped customer. */
+function repairDoc_(body) {
+  var ss = SpreadsheetApp.openById(SHEET_ID);
+  var up = ss.getSheetByName(UPCOMING_SHEET);
+  var gst = ss.getSheetByName(GST_SHEET);
+  var upVals = up.getDataRange().getValues();
+  var gstVals = gst.getDataRange().getValues();
+  var iName = colOf_(upVals[0], 'Customer name'), iExp = colOf_(upVals[0], 'Expire Date');
+  var iDur = colOf_(upVals[0], COL_DURATION);
+  var map; try { map = JSON.parse(PROPS.getProperty('DOCS_MAP') || '{}'); } catch (e) { map = {}; }
+  var only = String(body.customer || '').trim();
+  var out = [];
+  for (var r = 1; r < upVals.length; r++) {
+    var cust = String(upVals[r][iName] || '').trim();
+    if (!cust) continue;
+    if (only && cust.toLowerCase() !== only.toLowerCase()) continue;
+    var docId = map[cust] || '';
+    if (!docId) { if (only) out.push({ customer: cust, error: 'not mapped' }); continue; }
+
+    var entry = { customer: cust };
+    try {
+      var text = docText_(docId);
+      var invM = text.match(/ST\/\d{1,4}\/\d{4}-\d{1,2}/);
+      var last = findLastGstRecord_(gstVals, cust);
+      if (!invM || !last) throw new Error('cannot read invoice no from doc or no GST record');
+      entry.doc_invoice = invM[0];
+      entry.latest_invoice = last.invoiceNo;
+      if (invM[0] === last.invoiceNo) { entry.status = 'already current'; out.push(entry); continue; }
+
+      // the invoice the doc actually shows -> its GST row = the doc's true state
+      var old = null;
+      for (var g = 1; g < gstVals.length; g++) {
+        if (String(gstVals[g][0] || '').trim() === invM[0]) {
+          old = { invoiceNo: invM[0],
+                  invoiceDate: String(gstVals[g][1] || '').trim(),
+                  customer: String(gstVals[g][2] || '').trim(),
+                  desc: String(gstVals[g][4] || '').trim(),
+                  amount: num_(gstVals[g][5]), cgst: num_(gstVals[g][6]),
+                  sgst: num_(gstVals[g][7]), total: num_(gstVals[g][8]) };
+          break;
+        }
+      }
+      if (!old || !(old.total > 0)) throw new Error('doc shows invoice ' + invM[0] +
+        ' which has no GST RECORDS row — cannot derive the doc\\'s current values');
+
+      // the doc's actual period line (first "d to d" match) overrides guesses
+      var perM = text.match(/\d{2}\/\d{2}\/\d{4} to \d{2}\/\d{2}\/\d{4}/);
+      var expire = asDate_(upVals[r][iExp]);
+      var months = parseDuration_(iDur >= 0 ? String(upVals[r][iDur] || '') : '');
+      if (!(months > 0)) throw new Error('no parseable Duration in UPCOMING BILLS');
+      var newStart = expire ? addDays_(addMonths_(expire, -months), 1) : null;
+      if (!newStart) throw new Error('no parseable Expire Date in UPCOMING BILLS');
+      var bill = { invoiceNo: last.invoiceNo,
+                   invoiceDate: String(last.invoiceDate || ''),
+                   periodStart: fmtDMY_(newStart), periodEnd: fmtDMY_(expire),
+                   amount: last.amount, cgst: last.cgst, sgst: last.sgst,
+                   total: last.total, desc: last.desc };
+      var pairs = docEditPairs_(old, null, 0, bill);
+      pairs.forEach(function (p) {
+        if (p.name === 'Bill Period' && perM) p.old = perM[0];
+        if (p.name === 'Invoice Date' && old.invoiceDate) p.old = String(old.invoiceDate).replace(/\//g, '-');
+      });
+      var edit = editCustomerDoc_(docId, pairs);
+      entry.status = 'repaired ' + invM[0] + ' -> ' + last.invoiceNo;
+      entry.edited = edit.edited; entry.skipped = edit.skipped;
+    } catch (e) {
+      entry.status = 'ERROR: ' + String(e && e.message || e).slice(0, 160);
+    }
+    out.push(entry);
+    if (only) break;
+  }
+  if (only && !out.length) throw new Error('customer not found in UPCOMING BILLS: ' + only);
   return { ok: true, results: out };
 }
 
