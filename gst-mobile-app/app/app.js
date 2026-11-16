@@ -481,6 +481,8 @@ function renderAddCustomer(app) {
     '<div class="card">' +
     '<div class="field"><label>Customer name *</label>' +
     '<input id="a_name" placeholder="e.g. Sharma Traders"></div>' +
+    '<div class="field"><label>Address * (printed below the name)</label>' +
+    '<textarea id="a_address" placeholder="Street, area, Pune - PIN"></textarea></div>' +
     '<div class="grid2">' +
     '<div class="field"><label>Plan amount (₹) *</label>' +
     '<input id="a_amount" type="number" inputmode="decimal" step="0.01" min="0" placeholder="e.g. 500"></div>' +
@@ -489,14 +491,14 @@ function renderAddCustomer(app) {
       return '<option value="' + m + '"' + (m === 1 ? ' selected' : '') + '>' + m + '</option>';
     }).join('') + '</select></div>' +
     '</div>' +
-    '<div class="field"><label>Service description</label>' +
+    '<div class="field"><label>Bill period starts *</label>' +
+    '<input id="a_start" type="date"></div>' +
+    '<div class="field"><label>Plan description *</label>' +
     '<input id="a_desc" value="Broadband rental"></div>' +
     '<div class="grid2">' +
-    '<div class="field"><label>GSTIN (if any)</label><input id="a_gstin" placeholder="27ABCDE1234F1Z5"></div>' +
-    '<div class="field"><label>User id</label><input id="a_userid" placeholder="e.g. SHARMA01"></div>' +
+    '<div class="field"><label>GSTIN / UIN (optional — hidden if empty)</label><input id="a_gstin" placeholder="27ABCDE1234F1Z5"></div>' +
+    '<div class="field"><label>User id *</label><input id="a_userid" placeholder="e.g. SHARMA01"></div>' +
     '</div>' +
-    '<div class="field"><label>Buyer address</label>' +
-    '<textarea id="a_address" placeholder="Street, area, Pune - PIN"></textarea></div>' +
     '<div class="field"><label>Payment mode</label><input id="a_mode" value="Cash"></div>' +
     '</div>' +
 
@@ -507,10 +509,16 @@ function renderAddCustomer(app) {
     '</div></div>';
 
   $('#bk').onclick = back;
+  var todayISO = function () {
+    var d = new Date();
+    return d.getFullYear() + '-' + pad2(d.getMonth() + 1) + '-' + pad2(d.getDate());
+  };
+  $('#a_start').value = todayISO();
   var recalc = function () {
     var m = parseInt($('#a_months').value, 10) || 1;
     var amt = parseFloat($('#a_amount').value) || 0;
-    var p = new Date(); p.setDate(p.getDate());
+    var sParts = ($('#a_start').value || todayISO()).split('-');
+    var p = new Date(+sParts[0], +sParts[1] - 1, +sParts[2]);
     var e = new Date(p); e.setMonth(e.getMonth() + m); e.setDate(e.getDate() - 1);
     function dmy(d) { return pad2(d.getDate()) + '/' + pad2(d.getMonth() + 1) + '/' + String(d.getFullYear()).slice(2); }
     var cgst = Math.round(amt * 9) / 100, sgst = cgst, tot = Math.round((amt + cgst + sgst) * 100) / 100;
@@ -528,18 +536,25 @@ function renderAddCustomer(app) {
     var nm = $('#a_name').value.trim();
     var amt = parseFloat($('#a_amount').value);
     var m = parseInt($('#a_months').value, 10) || 1;
+    var ad = $('#a_address').value.trim();
+    var uid = $('#a_userid').value.trim();
+    var ds = $('#a_desc').value.trim();
     if (!nm) { toast('Enter the customer name', true); return; }
+    if (!ad) { toast('Enter the address (printed below the name)', true); return; }
+    if (!uid) { toast('Enter the user id', true); return; }
+    if (!ds) { toast('Enter the plan description', true); return; }
     if (!(amt > 0)) { toast('Enter a valid amount', true); return; }
-    if (!confirm('Onboard ' + nm + '?\n\nFirst invoice: next number in FY\nAmount: ' + money(amt) + ' (+9% CGST + 9% SGST), ' + m + ' month(s)\n\nCreates their Google Doc, archives the PDF, and adds them to the sheet.')) return;
+    if (!confirm('Onboard ' + nm + '?\n\nFirst invoice: next number in FY\nAmount: ' + money(amt) + ' (+9% CGST + 9% SGST), ' + m + ' month(s)\nPeriod: ' + $('#a_start').value + ' → ' + ($('#a_months').value) + ' month(s)\n\nCreates their Google Doc, archives the PDF, and adds them to the sheet.')) return;
     busy(true, 'Creating customer… making their doc…');
     api('add_customer', {
       name: nm,
       amount: amt,
       duration_months: m,
-      description: $('#a_desc').value.trim(),
+      period_start: $('#a_start').value,
+      description: ds,
       gstin: $('#a_gstin').value.trim(),
-      userid: $('#a_userid').value.trim(),
-      address: $('#a_address').value.trim(),
+      userid: uid,
+      address: ad,
       payment_mode: $('#a_mode').value.trim()
     }).then(function (res) {
       busy(false);
