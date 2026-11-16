@@ -1131,6 +1131,17 @@ function billViaCustomerDoc_(custName, last, oldExp, lastMonths, bill) {
   if (!docId) throw new Error('no Google Doc mapped for "' + custName +
     '" — run test_backend.py docs (sync) and check_docs first');
   var pairs = docEditPairs_(last, oldExp, lastMonths, bill);
+  // Anchor the critical pairs on the doc's ACTUAL current text where the
+  // back-computed values can drift: month-end periods (01/11->30/11 vs
+  // back-computed 31/10->30/11) and words-line formatting. The doc's own
+  // line is the truth for "old"; the new values come from the bill.
+  var docText = docText_(docId);
+  var perM = docText.match(/\d{2}\/\d{2}\/\d{4} to \d{2}\/\d{2}\/\d{4}/);
+  var wordM = docText.match(/[A-Z][A-Z ,\-]*RUPEES ONLY[^\n]*/);
+  pairs.forEach(function (p) {
+    if (p.name === 'Bill Period' && perM && p.old !== p.nw) p.old = perM[0];
+    if (p.name === 'Words' && wordM && p.old !== p.nw) p.old = wordM[0];
+  });
   var edit = editCustomerDoc_(docId, pairs);
   var arch = exportAndArchive_(docId, custName, bill.invoiceNo,
                                String(bill.invoiceDate || '').replace(/\//g, '-'));
@@ -1357,9 +1368,17 @@ function checkDocs_(body) {
       };
       var missing = [];
       for (var k in checks) {
-        if (checks[k] && text.indexOf(checks[k]) < 0) {
-          missing.push(k + ' ("' + String(checks[k]).slice(0, 30) + '")');
+        if (!checks[k]) continue;
+        if (text.indexOf(checks[k]) >= 0) continue;
+        // Bill Period: accept any period line whose END date matches the
+        // expiry (start-date conventions can differ by a day, e.g. a
+        // 01/11->30/11 month can back-compute as 31/10->30/11)
+        if (k === 'Bill Period' && expire) {
+          var pm = text.match(new RegExp('\\d{2}/\\d{2}/\\d{4} to ' +
+            escRegex_(fmtDMY_(expire))));
+          if (pm) continue;
         }
+        missing.push(k + ' ("' + String(checks[k]).slice(0, 30) + '")');
       }
       entry.lastInvoice = last ? last.invoiceNo : '(none in GST RECORDS)';
       if (exportTest) {
@@ -2108,10 +2127,12 @@ function ensureTextColumn_(up, title) {
 
 /** '1 Year' -> 12, '6 Months' -> 6, '1 Month' -> 1. 0 if unparseable. */
 function parseDuration_(text) {
-  var m = String(text || '').match(/(\d+)\s*(year|month)/i);
-  if (!m) return 0;
-  var n = parseInt(m[1], 10);
-  return n && /^year/i.test(m[2]) ? n * 12 : n;
+  var months = 0, m;
+  var re = /(\d+)\s*(year|month)/gi;
+  while ((m = re.exec(String(text || ''))) !== null) {
+    months += /^year/i.test(m[2]) ? parseInt(m[1], 10) * 12 : parseInt(m[1], 10);
+  }
+  return months;
 }
 
 /** Calendar-month advance with end-of-month clamping (31 Jan + 1M -> 28 Feb). */
