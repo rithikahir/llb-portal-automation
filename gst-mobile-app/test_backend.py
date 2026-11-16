@@ -68,8 +68,8 @@ def call(action: str, extra: dict | None = None, url_override: str = "") -> dict
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("command", choices=["ping", "list", "pdf", "template",
-                                        "folder", "docs", "checkdocs", "rebuild", "pdfs",
-                                        "copyblocks", "debugrebuild"])
+                                        "folder", "sheet", "docs", "checkdocs",
+                                        "rebuild", "pdfs", "copyblocks", "debugrebuild"])
     ap.add_argument("invoice_no", nargs="?", default="")
     ap.add_argument("--limit", type=int, default=0)
     ap.add_argument("--url", default="",
@@ -156,6 +156,14 @@ def main() -> None:
             if e["status"] == "OK":
                 ok += 1
         print(f"\nOK: {ok}/{len(out['results'])}")
+        return
+
+    if args.command == "sheet":
+        if not args.invoice_no:
+            sys.exit('usage:  python test_backend.py sheet "<new spreadsheet ID>"')
+        out = call("set_props", {"props": {"SHEET_ID": args.invoice_no.strip()}},
+                   url_override=args.url)
+        print(f"SHEET_ID set to {out.get('set', ['?'])[0] if out.get('set') else args.invoice_no.strip()}")
         return
 
     if args.command == "copyblocks":
