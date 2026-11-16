@@ -236,7 +236,10 @@ function renderTab(app, params) {
   app.innerHTML =
     '<div class="hdr"><div class="hdr-row">' +
     '<h1>' + (tab === 'today' ? 'GST Bills' : TABS[tab]) + '</h1>' +
+    '<span style="display:flex;gap:8px;align-items:center">' +
+    '<button class="iconbtn" id="addcust" title="Add customer" style="width:34px;height:34px;font-size:20px;line-height:1">＋</button>' +
     '<button class="iconbtn' + (state._refreshing ? ' spin' : '') + '" id="refresh" title="Refresh">' + svgRefresh() + '</button>' +
+    '</span>' +
     '</div><div class="sub" id="hdrsub">' + hdrSub(tab) + '</div></div>' +
     (state.online ? '' : '<div class="banner">⚠ Offline — showing last saved data</div>') +
     '<div id="tabbody"></div>' +
@@ -247,6 +250,7 @@ function renderTab(app, params) {
     navBtn('settings', '⚙️', 'Settings', tab) +
     '</nav>';
   $('#refresh').onclick = function () { refreshData(true); };
+  $('#addcust').onclick = function () { go(renderAddCustomer, {}); };
   $all('.nav button').forEach(function (b) {
     b.onclick = function () {
       if (b.dataset.tab === tab) return;
@@ -465,6 +469,90 @@ function detailBody(c) {
 }
 
 /* --------------------------------------------------------------- BILLING */
+/* ------------------------------------------------------ onboarding (new) */
+function renderAddCustomer(app) {
+  app.innerHTML =
+    '<div class="overlay"><div class="ohdr">' +
+    '<button class="back" id="bk">←</button><h2>＋ New customer</h2></div>' +
+    '<div class="wrap">' +
+
+    '<div class="summary" id="sumbox"></div>' +
+
+    '<div class="card">' +
+    '<div class="field"><label>Customer name *</label>' +
+    '<input id="a_name" placeholder="e.g. Sharma Traders"></div>' +
+    '<div class="grid2">' +
+    '<div class="field"><label>Plan amount (₹) *</label>' +
+    '<input id="a_amount" type="number" inputmode="decimal" step="0.01" min="0" placeholder="e.g. 500"></div>' +
+    '<div class="field"><label>Duration (months) *</label><select id="a_months">' +
+    [1, 3, 6, 12].map(function (m) {
+      return '<option value="' + m + '"' + (m === 1 ? ' selected' : '') + '>' + m + '</option>';
+    }).join('') + '</select></div>' +
+    '</div>' +
+    '<div class="field"><label>Service description</label>' +
+    '<input id="a_desc" value="Broadband rental"></div>' +
+    '<div class="grid2">' +
+    '<div class="field"><label>GSTIN (if any)</label><input id="a_gstin" placeholder="27ABCDE1234F1Z5"></div>' +
+    '<div class="field"><label>User id</label><input id="a_userid" placeholder="e.g. SHARMA01"></div>' +
+    '</div>' +
+    '<div class="field"><label>Buyer address</label>' +
+    '<textarea id="a_address" placeholder="Street, area, Pune - PIN"></textarea></div>' +
+    '<div class="field"><label>Payment mode</label><input id="a_mode" value="Cash"></div>' +
+    '</div>' +
+
+    '<div class="card"><div class="meta-line">📌 On confirm: invoice no is auto-assigned, the customer\'s <b>own Google Doc is created</b> (same layout as your other bills), the first bill PDF is archived on Drive under <b>BILLS/&lt;name&gt;</b>, a <b>GST RECORDS</b> row (Paid) is added, and the customer appears in <b>UPCOMING BILLS</b> with the new expiry.</div></div>' +
+
+    '<button class="btn primary" id="doAdd">🧾 Create customer &amp; first bill</button>' +
+    '<div style="height:20px"></div>' +
+    '</div></div>';
+
+  $('#bk').onclick = back;
+  var recalc = function () {
+    var m = parseInt($('#a_months').value, 10) || 1;
+    var amt = parseFloat($('#a_amount').value) || 0;
+    var p = new Date(); p.setDate(p.getDate());
+    var e = new Date(p); e.setMonth(e.getMonth() + m); e.setDate(e.getDate() - 1);
+    function dmy(d) { return pad2(d.getDate()) + '/' + pad2(d.getMonth() + 1) + '/' + String(d.getFullYear()).slice(2); }
+    var cgst = Math.round(amt * 9) / 100, sgst = cgst, tot = Math.round((amt + cgst + sgst) * 100) / 100;
+    $('#sumbox').innerHTML =
+      '<div class="line"><span>Bill period</span><b>' + (amt > 0 ? dmy(p) + ' → ' + dmy(e) : '—') + '</b></div>' +
+      '<div class="line"><span>Expiry</span><b>' + (amt > 0 ? dmy(e) : '—') + '</b></div>' +
+      '<div class="line"><span>Basic / CGST / SGST</span><b>' + money(amt) + ' / ' + money(cgst) + ' / ' + money(sgst) + '</b></div>' +
+      '<div class="line"><span>Invoice total</span><b class="big">' + money(tot) + '</b></div>' +
+      '<div class="line"><span>Invoice no</span><b>auto (next in FY)</b></div>';
+  };
+  ['#a_months', '#a_amount'].forEach(function (s) { $(s).oninput = recalc; $(s).onchange = recalc; });
+  recalc();
+
+  $('#doAdd').onclick = function () {
+    var nm = $('#a_name').value.trim();
+    var amt = parseFloat($('#a_amount').value);
+    var m = parseInt($('#a_months').value, 10) || 1;
+    if (!nm) { toast('Enter the customer name', true); return; }
+    if (!(amt > 0)) { toast('Enter a valid amount', true); return; }
+    if (!confirm('Onboard ' + nm + '?\n\nFirst invoice: next number in FY\nAmount: ' + money(amt) + ' (+9% CGST + 9% SGST), ' + m + ' month(s)\n\nCreates their Google Doc, archives the PDF, and adds them to the sheet.')) return;
+    busy(true, 'Creating customer… making their doc…');
+    api('add_customer', {
+      name: nm,
+      amount: amt,
+      duration_months: m,
+      description: $('#a_desc').value.trim(),
+      gstin: $('#a_gstin').value.trim(),
+      userid: $('#a_userid').value.trim(),
+      address: $('#a_address').value.trim(),
+      payment_mode: $('#a_mode').value.trim()
+    }).then(function (res) {
+      busy(false);
+      toast('Customer created ✓ ' + res.invoice_no);
+      go(renderBillSuccess, { result: res });
+      refreshData(false);
+    }).catch(function (e) {
+      busy(false);
+      toast('Onboarding failed: ' + e.message, true);
+    });
+  };
+}
+
 function renderBillForm(app, params) {
   var c = state.data.customers.filter(function (x) { return x.name === params.name; })[0];
   if (!c) { toast('Customer not found', true); back(); return; }
