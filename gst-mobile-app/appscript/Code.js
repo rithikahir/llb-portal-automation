@@ -99,6 +99,7 @@ function doPost(e) {
     if (body.action === 'list_pdfs') return jsonOut_(listPdfs_(body));
     if (body.action === 'get_pdf') return jsonOut_(getPdf_(body));
     if (body.action === 'map_doc') return jsonOut_(mapDoc_(body));
+    if (body.action === 'add_customer') return jsonOut_(addCustomer_(body));
     return jsonOut_({ ok: false, error: 'unknown action: ' + body.action });
   } catch (err) {
     return jsonOut_({ ok: false, error: String(err && err.message || err) });
@@ -111,7 +112,8 @@ function doGet() {
                     actions: ['get_due', 'complete', 'set_props',
                               'ping', 'list_all', 'bill_customer', 'make_pdf',
                               'sync_docs', 'check_docs', 'rebuild_doc',
-                              'list_pdfs', 'get_pdf', 'map_doc', 'debug_rebuild'] });
+                              'list_pdfs', 'get_pdf', 'map_doc', 'add_customer',
+                              'debug_rebuild'] });
 }
 
 /**
@@ -391,7 +393,7 @@ function appendGstRecord_(gst, gCols, v) {
   row[gCols['SGST 9% (₹)']] = v.sgst;
   row[gCols['Total Amount (₹)']] = v.total;
   row[gCols['Payment Mode']] = v.mode;
-  row[gCols['Payment Status']] = 'Pending';
+  row[gCols['Payment Status']] = v.payment_status || 'Pending';
   var range = gst.getRange(rowIdx, 1, 1, GST_COLUMNS.length);
   range.setValues([row]);
   var dCell = gst.getRange(rowIdx, gCols['Invoice Date'] + 1);
@@ -835,7 +837,7 @@ function syncDocs_(body) {
       var s = nameScore_(f.name.replace(/\.docx?$/i, ''), c);
       if (s > bestScore) { bestScore = s; best = c; }
     });
-    var entry = { doc: f.name, path: f.path, isGoogleDoc: f.isGoogleDoc,
+    var entry = { doc: f.name, id: f.id, path: f.path, isGoogleDoc: f.isGoogleDoc,
                   match: bestScore >= 0.8 ? best : '(no clear match)',
                   score: Math.round(bestScore * 100) / 100 };
     if (bestScore >= 0.8 && best) {
@@ -1097,6 +1099,166 @@ function billViaCustomerDoc_(custName, last, oldExp, lastMonths, bill) {
                                String(bill.invoiceDate || '').replace(/\//g, '-'));
   return { blob: arch.blob, source: 'customer-doc', file: arch.file, folderUrl: arch.folderUrl,
            edited: edit.edited, skipped: edit.skipped, desc: edit.desc };
+}
+
+/** add_customer: onboard a NEW customer end-to-end:
+ *  1. creates their Google Doc by copying a mapped customer's doc (identical
+ *     layout, pure DocumentApp — no template needed) and replacing the
+ *     donor's values with the new customer's first-bill values
+ *  2. exports + archives the first invoice PDF under BILLS/<Customer>/
+ *  3. appends the first invoice to GST RECORDS (Payment Status: Paid)
+ *  4. appends them to UPCOMING BILLS (expire = first period end) + re-sorts
+ *  5. maps the new doc (DOCS_MAP)
+ *  The sheet is written only after the doc + PDF succeeded; on any doc/parse
+ *  failure the copy is trashed and nothing is saved. */
+function addCustomer_(body) {
+  var name = String(body.name || '').trim();
+  if (!name) throw new Error('name is required');
+  var months = parseInt(body.duration_months, 10);
+  if (!(months > 0)) months = 1;
+  var amount = parseFloat(body.amount);
+  if (!(amount > 0)) throw new Error('amount is required');
+
+  var ss = SpreadsheetApp.openById(SHEET_ID);
+  var up = ss.getSheetByName(UPCOMING_SHEET);
+  var gst = ss.getSheetByName(GST_SHEET);
+  if (!up || !gst) throw new Error('tabs "' + UPCOMING_SHEET + '" / "' + GST_SHEET + '" not found');
+  var upVals = up.getDataRange().getValues();
+  var iName = colOf_(upVals[0], 'Customer name');
+  var iExp = colOf_(upVals[0], 'Expire Date');
+  if (iName < 0 || iExp < 0) throw new Error('UPCOMING BILLS needs "Customer name" and "Expire Date" columns');
+  var iDur = colOf_(upVals[0], COL_DURATION);
+  var iAddr = colOf_(upVals[0], COL_ADDRESS);
+  var iUser = colOf_(upVals[0], COL_USERID);
+
+  for (var r = 1; r < upVals.length; r++) {
+    if (String(upVals[r][iName] || '').trim().toLowerCase() === name.toLowerCase()) {
+      throw new Error('customer already exists in UPCOMING BILLS: ' + name);
+    }
+  }
+
+  var map;
+  try { map = JSON.parse(PROPS.getProperty('DOCS_MAP') || '{}'); } catch (e) { map = {}; }
+
+  // --- donor: a mapped customer whose doc + last record are complete enough
+  //     to drive the replacement (gstin, invoice no + date, amount, parseable
+  //     expiry + duration). Prefers one that also has address + user id.
+  var gstVals = gst.getDataRange().getValues();
+  var donor = null;
+  for (var c in map) {
+    var dLast = findLastGstRecord_(gstVals, c);
+    if (!dLast || !dLast.invoiceNo || !String(dLast.invoiceDate || '') ||
+        !(dLast.amount > 0) || !String(dLast.gstin || '')) continue;
+    var dRow = -1;
+    for (var rr = 1; rr < upVals.length; rr++) {
+      if (String(upVals[rr][iName] || '').trim().toLowerCase() === c.toLowerCase()) { dRow = rr; break; }
+    }
+    if (dRow < 0) continue;
+    var dExp = asDate_(upVals[dRow][iExp]);
+    if (!dExp) continue;
+    var dMonths = parseDuration_(iDur >= 0 ? String(upVals[dRow][iDur] || '') : '');
+    if (!(dMonths > 0)) continue;
+    var dAddr = iAddr >= 0 ? String(upVals[dRow][iAddr] || '').trim() : '';
+    var dUser = iUser >= 0 ? String(upVals[dRow][iUser] || '').trim() : '';
+    var score = (dAddr ? 2 : 0) + (dUser ? 1 : 0);
+    if (!donor || score > donor.score) {
+      donor = { cust: String(c), last: dLast, exp: dExp, months: dMonths,
+                addr: dAddr, user: dUser, score: score };
+    }
+  }
+  if (!donor) throw new Error('no suitable donor doc — need one mapped customer whose GST record has gstin, invoice no + date, amount, and a parseable expiry + duration');
+
+  // --- the first bill (seed) -------------------------------------------------
+  var today = startOfDay_(new Date());
+  var periodStart = today;
+  var periodEnd = addDays_(addMonths_(today, months), -1);
+  var invoiceNo = nextInvoiceNo_(gstVals, today);
+  var cgst = round2_(amount * 0.09), sgst = round2_(amount * 0.09);
+  var total = round2_(amount + cgst + sgst);
+  var desc = String(body.description || '').trim() || 'Broadband rental';
+  var mode = String(body.payment_mode || '').trim() || 'Cash';
+  var address = String(body.address || '').trim();
+  var userid = String(body.userid || '').trim();
+  var gstin = String(body.gstin || '').trim();
+  var seed = {
+    buyer: name, address: address, gstin: gstin, userid: userid || '-',
+    invoiceNo: invoiceNo, invoiceDate: fmtShort_(today),
+    periodStart: fmtDMY_(periodStart), periodEnd: fmtDMY_(periodEnd),
+    desc: desc, amount: amount, cgst: cgst, sgst: sgst, total: total, mode: mode
+  };
+
+  // --- create the doc: copy the donor's, replace donor values -> new ---------
+  var copyId = DriveApp.getFileById(map[donor.cust])
+    .makeCopy(sanitizeFile_(name), docsFolder_()).getId();
+  try {
+    Utilities.sleep(1500);                     // let the fresh copy settle
+    var docText = docText_(copyId);            // donor state, pre-edit
+    function locate_(needle) {                 // exact match first, then
+      needle = String(needle || '');           // case-insensitive slice
+      if (!needle) return '';
+      if (docText.indexOf(needle) >= 0) return needle;
+      var j = docText.toLowerCase().indexOf(needle.toLowerCase());
+      return j >= 0 ? docText.substr(j, needle.length) : '';
+    }
+    var pairs = docEditPairs_(donor.last, donor.exp, donor.months, seed);
+    pairs = pairs.filter(function (p) { return p.name !== 'Description'; });
+    var buyerOld = locate_(donor.last.customer);
+    if (buyerOld) pairs.push({ name: 'Buyer', old: buyerOld, nw: name });
+    var addrOld = locate_(donor.addr);
+    if (addrOld) pairs.push({ name: 'Address', old: addrOld, nw: address, warn: true });
+    var userOld = locate_(donor.user);
+    if (userOld) pairs.push({ name: 'User ID', old: userOld, nw: userid || '-', warn: true });
+    var gstinOld = locate_(donor.last.gstin);
+    if (gstinOld) pairs.push({ name: 'GSTIN', old: gstinOld, nw: gstin, warn: true });
+    pairs.push({ name: 'Description', old: donor.last.desc, nw: desc, warn: true });
+    var edit = editCustomerDoc_(copyId, pairs);
+    if (docText_(copyId).toLowerCase().indexOf(name.toLowerCase()) < 0) {
+      throw new Error('the buyer line could not be replaced — doc layout unexpected');
+    }
+    var arch = exportAndArchive_(copyId, name, invoiceNo,
+                                 String(seed.invoiceDate).replace(/\//g, '-'));
+  } catch (err) {
+    try { DriveApp.getFileById(copyId).setTrashed(true); } catch (e2) { /* keep going */ }
+    throw new Error('doc creation failed — nothing was saved. ' +
+      String(err && err.message || err));
+  }
+
+  // --- doc + PDF safe -> sheet ------------------------------------------------
+  map[name] = copyId;
+  saveDocsMap_(map);
+  var gCols = {};
+  GST_COLUMNS.forEach(function (cc) { gCols[cc] = colOf_(gstVals[0], cc); });
+  appendGstRecord_(gst, gCols, {
+    invoiceNo: invoiceNo, invoiceDate: fmtShort_(today), customer: name,
+    gstin: gstin, desc: desc, amount: amount, cgst: cgst, sgst: sgst,
+    total: total, mode: mode, payment_status: 'Paid'
+  });
+
+  var newRow = up.getLastRow() + 1;
+  up.getRange(newRow, iName + 1).setValue(name);
+  var expCell = up.getRange(newRow, iExp + 1);
+  expCell.setNumberFormat('dd/mm/yy');
+  expCell.setValue(periodEnd);
+  if (iDur >= 0) up.getRange(newRow, iDur + 1).setValue(durationText_(months));
+  if (address && iAddr < 0) iAddr = ensureTextColumn_(up, COL_ADDRESS);
+  if (address && iAddr >= 0) up.getRange(newRow, iAddr + 1).setValue(address);
+  if (userid && iUser < 0) iUser = ensureTextColumn_(up, COL_USERID);
+  if (userid && iUser >= 0) up.getRange(newRow, iUser + 1).setValue(userid);
+  sortUpcomingByExpire_(up, iExp);
+
+  return {
+    ok: true, customer: name,
+    invoice_no: invoiceNo, invoice_date: fmtShort_(today),
+    period: { start: fmtDMY_(periodStart), end: fmtDMY_(periodEnd) },
+    new_expire: fmtDMY_(periodEnd),
+    amount: amount, cgst: cgst, sgst: sgst, total: total,
+    desc: desc, mode: mode, duration_months: months,
+    doc_id: copyId,
+    pdf_source: 'customer-doc (new customer)',
+    pdf_file: arch.file, pdf_folder: arch.folderUrl,
+    pdf_name: sanitizeFile_(name) + '_BILL.pdf',
+    pdf_base64: Utilities.base64Encode(arch.blob.getBytes())
+  };
 }
 
 /* --------------------------------------------------- doc health checks ---- */
