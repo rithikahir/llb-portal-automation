@@ -98,6 +98,7 @@ function doPost(e) {
     if (body.action === 'rebuild_doc') return jsonOut_(rebuildDoc_(body));
     if (body.action === 'list_pdfs') return jsonOut_(listPdfs_(body));
     if (body.action === 'get_pdf') return jsonOut_(getPdf_(body));
+    if (body.action === 'map_doc') return jsonOut_(mapDoc_(body));
     return jsonOut_({ ok: false, error: 'unknown action: ' + body.action });
   } catch (err) {
     return jsonOut_({ ok: false, error: String(err && err.message || err) });
@@ -110,7 +111,7 @@ function doGet() {
                     actions: ['get_due', 'complete', 'set_props',
                               'ping', 'list_all', 'bill_customer', 'make_pdf',
                               'sync_docs', 'check_docs', 'rebuild_doc',
-                              'list_pdfs', 'get_pdf', 'debug_rebuild'] });
+                              'list_pdfs', 'get_pdf', 'map_doc', 'debug_rebuild'] });
 }
 
 /**
@@ -791,6 +792,15 @@ function customerDocId_(custName) {
 
 function saveDocsMap_(map) { PROPS.setProperty('DOCS_MAP', JSON.stringify(map)); }
 
+/** Manual overrides: customer -> doc id set via map_doc. Survives sync_docs
+ *  (which rebuilds the auto-matched map); manual entries always win. */
+function loadManualMap_() {
+  var raw = PROPS.getProperty('DOCS_MAP_MANUAL');
+  if (!raw) return {};
+  try { return JSON.parse(raw); } catch (e) { return {}; }
+}
+function saveManualMap_(m) { PROPS.setProperty('DOCS_MAP_MANUAL', JSON.stringify(m)); }
+
 /* --------------------------------------------------------------- sync ----- */
 
 /** sync_docs: walk the docs folder recursively, fuzzy-match every Google Doc
@@ -818,6 +828,7 @@ function syncDocs_(body) {
   }
   walk(docsFolder_(), '');
   var map = {}, report = [];
+  var manual = loadManualMap_();
   files.forEach(function (f) {
     var best = null, bestScore = 0;
     customers.forEach(function (c) {
@@ -828,17 +839,64 @@ function syncDocs_(body) {
                   match: bestScore >= 0.8 ? best : '(no clear match)',
                   score: Math.round(bestScore * 100) / 100 };
     if (bestScore >= 0.8 && best) {
-      entry.status = f.isGoogleDoc ? 'mapped' : 'needs conversion (open as Google Doc)';
-      if (f.isGoogleDoc && !map[best]) map[best] = f.id;
-      else if (f.isGoogleDoc && map[best]) entry.status = 'duplicate match (first kept)';
+      if (manual[best]) {
+        // customer is bound manually — never auto-override it
+        entry.status = 'manual mapping kept: ' + manual[best];
+      } else if (f.isGoogleDoc && !map[best]) {
+        entry.status = 'mapped';
+        map[best] = f.id;
+      } else if (f.isGoogleDoc && map[best]) {
+        entry.status = 'duplicate match (first kept)';
+      } else {
+        entry.status = 'needs conversion (open as Google Doc)';
+      }
     } else {
       entry.status = 'unmatched';
     }
     report.push(entry);
   });
+  for (var mc in manual) map[mc] = manual[mc];   // manual wins, always
   saveDocsMap_(map);
   return { ok: true, docs_found: files.length, customers: customers.length,
            mapped: Object.keys(map).length, map: map, report: report };
+}
+
+/** map_doc: manually bind one Google Doc to one customer (e.g. files whose
+ *  names the auto-matcher can't guess: NARENDRAA_BILL, STNHQ_BILL,
+ *  RANKA_BUNGLOW_BILL). The binding is stored in DOCS_MAP_MANUAL and survives
+ *  every sync_docs run — manual always wins over auto-match. */
+function mapDoc_(body) {
+  var cust = String(body.customer || '').trim();
+  var docId = String(body.doc_id || '').trim();
+  if (!cust || !docId) throw new Error('customer and doc_id are required');
+  var ss = SpreadsheetApp.openById(SHEET_ID);
+  var up = ss.getSheetByName(UPCOMING_SHEET);
+  var vals = up.getDataRange().getValues();
+  var iName = colOf_(vals[0], 'Customer name');
+  var found = '';
+  for (var r = 1; r < vals.length; r++) {
+    if (String(vals[r][iName] || '').trim().toLowerCase() === cust.toLowerCase()) {
+      found = String(vals[r][iName] || '').trim();
+      break;
+    }
+  }
+  if (!found) throw new Error('customer not found in UPCOMING BILLS: ' + cust);
+  var f = DriveApp.getFileById(docId);
+  if (f.getMimeType() !== MimeType.GOOGLE_DOCS) {
+    throw new Error('not a Google Doc yet — File > Save as Google Docs first (mime: ' +
+      f.getMimeType() + ')');
+  }
+  var manual = loadManualMap_();
+  manual[found] = docId;
+  saveManualMap_(manual);
+  var merged = {};
+  try { merged = JSON.parse(PROPS.getProperty('DOCS_MAP') || '{}'); } catch (e) { merged = {}; }
+  merged[found] = docId;
+  saveDocsMap_(merged);
+  var starts = '';
+  try { starts = DocumentApp.openById(docId).getBody().getText().slice(0, 100); } catch (e2) {}
+  return { ok: true, customer: found, doc_id: docId, doc_name: f.getName(),
+           mapped: true, doc_starts: starts };
 }
 
 /** Doc id -> previous-bill value pairs for the in-place edit. Old values are
