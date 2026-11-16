@@ -644,9 +644,29 @@ function billCustomer_(body) {
 
   // --- period + invoice no -------------------------------------------------
   var today = startOfDay_(new Date());
+  // --- invoice-date guard + early-billing override -------------------------
+  // A renewal may be invoiced only AFTER the current plan expires (from the
+  // next day on). To bill early, the caller must send `invoice_date`
+  // (yyyy-mm-dd) strictly after the expiry — that date is then used on the
+  // bill AND in GST RECORDS, so the invoice reads as if it was created after
+  // the plan expired. Without the override the request is rejected.
+  var invoiceDate = today;
+  var ovRaw = String(body.invoice_date || '').trim();
+  if (/^\d{4}-\d{2}-\d{2}$/.test(ovRaw)) {
+    var ovp = ovRaw.split('-');
+    invoiceDate = new Date(Number(ovp[0]), Number(ovp[1]) - 1, Number(ovp[2]));
+    if (invoiceDate <= oldExp) {
+      throw new Error('override invoice date (' + fmtDMY_(invoiceDate) +
+        ') must be AFTER ' + custName + '"s expiry (' + fmtDMY_(oldExp) + ')');
+    }
+  } else if (today <= oldExp) {
+    throw new Error(custName + ' is covered until ' + fmtDMY_(oldExp) +
+      ' — a bill can be invoiced only after expiry (from ' + fmtDMY_(addDays_(oldExp, 1)) +
+      '). To bill early, enable the override and pick an invoice date after the expiry.');
+  }
   var periodStart = addDays_(oldExp, 1);
   var periodEnd = addDays_(addMonths_(periodStart, months), -1);
-  var invoiceNo = nextInvoiceNo_(gstVals, today);
+  var invoiceNo = nextInvoiceNo_(gstVals, invoiceDate);
 
   // --- amounts -------------------------------------------------------------
   var amount = parseFloat(body.amount);
@@ -672,7 +692,7 @@ function billCustomer_(body) {
     gstin: last.gstin,
     userid: userid,
     invoiceNo: invoiceNo,
-    invoiceDate: fmtShort_(today),
+    invoiceDate: fmtShort_(invoiceDate),
     periodStart: fmtDMY_(periodStart),
     periodEnd: fmtDMY_(periodEnd),
     desc: desc,
@@ -703,7 +723,7 @@ function billCustomer_(body) {
       GST_COLUMNS.forEach(function (c) { gCols[c] = colOf_(gstVals[0], c); });
       appendGstRecord_(gst, gCols, {
         invoiceNo: invoiceNo,
-        invoiceDate: fmtShort_(today),
+        invoiceDate: fmtShort_(invoiceDate),
         customer: last.customer, gstin: last.gstin, desc: desc,
         amount: amount, cgst: cgst, sgst: sgst, total: total, mode: mode
       });
@@ -730,7 +750,7 @@ function billCustomer_(body) {
     ok: true,
     customer: custName,
     invoice_no: invoiceNo,
-    invoice_date: fmtShort_(today),
+    invoice_date: fmtShort_(invoiceDate),
     appended: appended,
     sheet_updated: sheetError === null,
     sheet_error: sheetError,
