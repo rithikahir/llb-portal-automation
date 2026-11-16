@@ -69,8 +69,11 @@ def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("command", choices=["ping", "list", "pdf", "template",
                                         "folder", "sheet", "docs", "checkdocs",
-                                        "rebuild", "pdfs", "copyblocks", "debugrebuild"])
+                                        "rebuild", "pdfs", "map", "copyblocks",
+                                        "debugrebuild"])
     ap.add_argument("invoice_no", nargs="?", default="")
+    ap.add_argument("--doc", default="",
+                    help="doc id for the map command")
     ap.add_argument("--limit", type=int, default=0)
     ap.add_argument("--url", default="",
                     help="web app /exec URL to test (default: .env appscript_url — "
@@ -164,6 +167,16 @@ def main() -> None:
         out = call("set_props", {"props": {"SHEET_ID": args.invoice_no.strip()}},
                    url_override=args.url)
         print(f"SHEET_ID set to {out.get('set', ['?'])[0] if out.get('set') else args.invoice_no.strip()}")
+        return
+
+    if args.command == "map":
+        if not args.invoice_no or not args.doc:
+            sys.exit('usage:  python test_backend.py map "<exact customer name>" --doc <Google Doc id>')
+        out = call("map_doc", {"customer": args.invoice_no, "doc_id": args.doc.strip()},
+                   url_override=args.url)
+        print(f"mapped '{out['customer']}' -> {out['doc_id']}  ({out.get('doc_name')})")
+        if out.get("doc_starts") is not None:
+            print(f"doc starts: {out['doc_starts'][:80]!r}")
         return
 
     if args.command == "copyblocks":
