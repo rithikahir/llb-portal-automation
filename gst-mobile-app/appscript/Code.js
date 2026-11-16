@@ -101,6 +101,7 @@ function doPost(e) {
     if (body.action === 'map_doc') return jsonOut_(mapDoc_(body));
     if (body.action === 'add_customer') return jsonOut_(addCustomer_(body));
     if (body.action === 'repair_doc') return jsonOut_(repairDoc_(body));
+    if (body.action === 'update_payment') return jsonOut_(updatePayment_(body));
     return jsonOut_({ ok: false, error: 'unknown action: ' + body.action });
   } catch (err) {
     return jsonOut_({ ok: false, error: String(err && err.message || err) });
@@ -114,7 +115,7 @@ function doGet() {
                               'ping', 'list_all', 'bill_customer', 'make_pdf',
                               'sync_docs', 'check_docs', 'rebuild_doc',
                               'list_pdfs', 'get_pdf', 'map_doc', 'add_customer',
-                    'repair_doc',
+                    'repair_doc', 'update_payment',
                               'debug_rebuild'] });
 }
 
@@ -1397,6 +1398,59 @@ function checkDocs_(body) {
     out.push(entry);
   }
   return { ok: true, results: out };
+}
+
+/** update_payment: set Payment Status / Payment Date on ONE GST RECORDS row.
+ *  body: { customer, invoice_no, payment_status: 'Paid'|'Pending',
+ *          payment_date: 'yyyy-mm-dd' (used when status = Paid; defaults today) }
+ *  The row is located by invoice no + best fuzzy customer match (invoice nos
+ *  are NOT unique across customers — e.g. two Skin Cities share ST/048). */
+function updatePayment_(body) {
+  var cust = String(body.customer || '').trim();
+  var inv = String(body.invoice_no || '').trim();
+  var status = String(body.payment_status || '').trim();
+  if (!cust || !inv) throw new Error('customer and invoice_no are required');
+  if (status !== 'Paid' && status !== 'Pending')
+    throw new Error("payment_status must be 'Paid' or 'Pending'");
+  var payDate = null;
+  if (status === 'Paid') {
+    var pdRaw = String(body.payment_date || '').trim();
+    if (/^\d{4}-\d{2}-\d{2}$/.test(pdRaw)) {
+      var p = pdRaw.split('-');
+      payDate = new Date(Number(p[0]), Number(p[1]) - 1, Number(p[2]));
+    } else {
+      payDate = startOfDay_(new Date());
+    }
+  }
+  var ss = SpreadsheetApp.openById(SHEET_ID);
+  var gst = ss.getSheetByName(GST_SHEET);
+  var vals = gst.getDataRange().getValues();
+  var iStatus = colOf_(vals[0], 'Payment Status');
+  var iPayDate = colOf_(vals[0], 'Payment Date');
+  if (iStatus < 0) throw new Error('GST RECORDS has no "Payment Status" column');
+  var row = -1, bestScore = 0;
+  for (var r = 1; r < vals.length; r++) {
+    if (String(vals[r][0] || '').trim() !== inv) continue;
+    var s = nameScore_(cust, String(vals[r][2] || ''));
+    if (s > bestScore) { bestScore = s; row = r; }
+  }
+  if (row < 0) throw new Error('no GST RECORDS row with invoice ' + inv + ' for ' + cust);
+  var prev = String(vals[row][iStatus] || '').trim();
+  gst.getRange(row + 1, iStatus + 1).setValue(status);
+  var dateStr = '';
+  if (iPayDate >= 0) {
+    var cellD = gst.getRange(row + 1, iPayDate + 1);
+    if (status === 'Paid' && payDate) {
+      cellD.setNumberFormat('dd/mm/yy');
+      cellD.setValue(payDate);
+      dateStr = fmtDMY_(payDate);
+    } else if (status === 'Pending') {
+      cellD.setValue('');                    // unpaid -> no payment date
+    }
+  }
+  return { ok: true, customer: cust, invoice_no: inv,
+           previous_status: prev, payment_status: status,
+           payment_date: dateStr, row: row + 1 };
 }
 
 /** repair_doc: bring a customer's Google Doc back in sync with their LATEST
