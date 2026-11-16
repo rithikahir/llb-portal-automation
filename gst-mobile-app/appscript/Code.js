@@ -882,7 +882,22 @@ function mapDoc_(body) {
       break;
     }
   }
-  if (!found) throw new Error('customer not found in UPCOMING BILLS: ' + cust);
+  if (!found) {
+    // fall back: allow names that exist only in GST RECORDS (e.g. service
+    // sub-records like "… Switch" / "… Router" with no UPCOMING BILLS row)
+    var gst2 = ss.getSheetByName(GST_SHEET);
+    var gv2 = gst2.getDataRange().getValues();
+    var iCust2 = colOf_(gv2[0], 'Customer Name');
+    if (iCust2 >= 0) {
+      for (var g2 = 1; g2 < gv2.length; g2++) {
+        if (String(gv2[g2][iCust2] || '').trim().toLowerCase() === cust.toLowerCase()) {
+          found = String(gv2[g2][iCust2] || '').trim();
+          break;
+        }
+      }
+    }
+  }
+  if (!found) throw new Error('customer not found in UPCOMING BILLS or GST RECORDS: ' + cust);
   var f = DriveApp.getFileById(docId);
   if (f.getMimeType() !== MimeType.GOOGLE_DOCS) {
     throw new Error('not a Google Doc yet — File > Save as Google Docs first (mime: ' +
