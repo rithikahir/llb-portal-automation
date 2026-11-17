@@ -108,6 +108,7 @@ def cmd_login():
             q = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
             result['code'] = (q.get('code') or [None])[0]
             result['error'] = (q.get('error') or [None])[0]
+            print('   <- callback received: %s' % ('code OK' if result['code'] else 'error=' + str(result['error'])), flush=True)
             self.send_response(200)
             self.send_header('Content-Type', 'text/html')
             self.end_headers()
@@ -116,38 +117,44 @@ def cmd_login():
                               % ('✅ Logged in — you can close this tab.' if ok
                                  else '❌ Login failed: ' + str(result.get('error')))).encode())
 
-        def log_message(self, *a):  # silence
-            pass
+        def log_message(self, *a):
+            print('   <- request:', a[0] if a else '', flush=True)
 
     port = 5577
     server = HTTPServer(('localhost', port), Handler)
-    threading.Thread(target=server.serve_forever, daemon=True).start()
-
+    server.timeout = 3                     # handle_request returns every 3s
     auth = ('https://accounts.google.com/o/oauth2/v2/auth?' + urllib.parse.urlencode({
         'client_id': CLIENT_ID, 'redirect_uri': 'http://localhost:%d' % port,
         'response_type': 'code', 'scope': ' '.join(SCOPES),
         'access_type': 'offline', 'prompt': 'consent'}))
     print('Opening the browser — approve with the account that owns the script...')
     print('(if it does not open, paste this URL there):\n' + auth)
+    print('Waiting up to 5 minutes — if the tab shows "can\'t connect" or an error,')
+    print('copy the URL from the address bar and give it to me instead (paste-login).')
     import webbrowser
+    import time
     webbrowser.open(auth)
-    for _ in range(300):                    # up to ~5 min
-        if result.get('code') or result.get('error'):
-            break
-        server.handle_request()
-    server.shutdown()
+    t0 = time.time()
+    while not result.get('code') and not result.get('error') and time.time() - t0 < 300:
+        server.handle_request()            # respects server.timeout
+    server.server_close()                  # NOT shutdown(): it deadlocks without serve_forever()
     if result.get('error') or not result.get('code'):
         sys.exit('login aborted: %s' % result.get('error'))
+    exchange(result['code'], 'http://localhost:%d' % port)
+
+
+def exchange(code, redirect_uri):
+    """Trade an auth code for tokens and save them."""
     tok = post_form('https://oauth2.googleapis.com/token', {
         'client_id': CLIENT_ID, 'client_secret': CLIENT_SECRET,
-        'code': result['code'], 'grant_type': 'authorization_code',
-        'redirect_uri': 'http://localhost:%d' % port})
+        'code': code, 'grant_type': 'authorization_code',
+        'redirect_uri': redirect_uri})
     if not tok.get('refresh_token'):
         sys.exit('no refresh token returned — revoke the app at '
                  'https://myaccount.google.com/permissions and run login again')
     save_token({'refresh_token': tok['refresh_token'], 'access_token': tok['access_token'],
                 'expiry': __import__('time').time() + tok.get('expires_in', 3600) - 120})
-    print('✅ logged in — token saved to .deploy-token.json (gitignored)')
+    print('LOGGED IN - token saved to .deploy-token.json (gitignored)')
 
 
 # ---------------------------------------------------------------- push ----
@@ -185,17 +192,30 @@ def cmd_push():
     dep = api('GET', '%s/%s/deployments/%s' % (API, sid, did), t)
     dcfg = dep.get('deploymentConfig', {})
     dcfg['versionNumber'] = vnum
-    api('PATCH', '%s/%s/deployments/%s' % (API, sid, did), t, {'deploymentConfig': dcfg})
+    # PUT (as the official googleapis client does) — PATCH gets an HTML 404
+    api('PUT', '%s/%s/deployments/%s' % (API, sid, did), t, {'deploymentConfig': dcfg})
 
-    print('✅ deployed — Code.js is LIVE on the same /exec URL (version %s)' % vnum)
+    print('DEPLOYED - Code.js is LIVE on the same /exec URL (version %s)' % vnum)
 
 
 if __name__ == '__main__':
     cmd = sys.argv[1] if len(sys.argv) > 1 else ''
     if cmd == 'login':
         cmd_login()
+    elif cmd == 'paste':
+        # fallback: the user copies the final redirect URL (address bar, even
+        # on an error page) and we exchange the code from it
+        url = sys.argv[2] if len(sys.argv) > 2 else sys.exit(
+            'usage:  python deploy_backend.py paste "<redirect url>"')
+        q = urllib.parse.parse_qs(urllib.parse.urlparse(url).query)
+        code = (q.get('code') or [None])[0]
+        err = (q.get('error') or [None])[0]
+        if err or not code:
+            sys.exit('that URL has no auth code (error=%s) — run login again' % err)
+        exchange(code, 'http://localhost:5577')
     elif cmd == 'push':
         cmd_push()
     else:
-        sys.exit('usage:  python deploy_backend.py login   (one-time)\n'
+        sys.exit('usage:  python deploy_backend.py login   (one-time, browser)\n'
+                '        python deploy_backend.py paste "<redirect url>"  (fallback)\n'
                 '        python deploy_backend.py push    (push + deploy new version)')
