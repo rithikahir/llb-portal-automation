@@ -321,6 +321,32 @@ function bindCustomerCards(root) {
   });
 }
 
+/* sort for due lists: earliest expire date first; on the same date the
+   lower invoice no first (numeric-aware: ST/031 < ST/032 < ST/100) */
+function invKey_(s) {
+  return String(s || '').toLowerCase().split(/[^a-z0-9]+/).filter(Boolean)
+    .map(function (t) { return /^\d+$/.test(t) ? Number(t) : t; });
+}
+function cmpInvoice_(x, y) {
+  var a = invKey_(x), b = invKey_(y), i;
+  for (i = 0; i < Math.max(a.length, b.length); i++) {
+    if (a[i] === undefined) return -1;
+    if (b[i] === undefined) return 1;
+    if (a[i] !== b[i]) {
+      var bothNum = typeof a[i] === 'number' && typeof b[i] === 'number';
+      return (bothNum ? a[i] - b[i] : (String(a[i]) < String(b[i]) ? -1 : 1));
+    }
+  }
+  return 0;
+}
+function byDue_(a, b) {
+  var da = daysLeft(a.expire_iso), db = daysLeft(b.expire_iso);
+  if (da !== db) return da - db;
+  return cmpInvoice_(a.last_invoice && a.last_invoice.invoice_no,
+                     b.last_invoice && b.last_invoice.invoice_no) ||
+         a.name.localeCompare(b.name);
+}
+
 function renderToday(body) {
   if (!state.data) {
     body.innerHTML = '<div class="empty"><div class="big">📭</div>No data yet.<br><br>' +
@@ -331,17 +357,18 @@ function renderToday(body) {
   var today = cs.filter(function (c) { return daysLeft(c.expire_iso) === 0; });
   var overdue = cs.filter(function (c) { var d = daysLeft(c.expire_iso); return d !== null && d < 0; });
   var week = cs.filter(function (c) { var d = daysLeft(c.expire_iso); return d !== null && d > 0 && d <= 7; });
+  overdue.sort(byDue_); today.sort(byDue_); week.sort(byDue_);
   var html = '';
 
+  if (overdue.length) {
+    html += '<div class="section-title" style="color:var(--danger)">⚠ Overdue (' + overdue.length + ')</div>' +
+      overdue.map(function (c) { return customerCard(c); }).join('');
+  }
   if (today.length) {
     html += '<div class="section-title" style="color:var(--danger)">🔴 Expires today (' + today.length + ')</div>' +
       '<div class="card" style="background:var(--danger-soft);border-color:#fecaca">' +
       '<div class="meta-line" style="color:var(--danger)"><b>Bill these customers now</b> — their plan ends today.</div></div>' +
       today.map(function (c) { return customerCard(c); }).join('');
-  }
-  if (overdue.length) {
-    html += '<div class="section-title" style="color:var(--danger)">⚠ Overdue (' + overdue.length + ')</div>' +
-      overdue.map(function (c) { return customerCard(c); }).join('');
   }
   if (week.length) {
     html += '<div class="section-title">Next 7 days (' + week.length + ')</div>' +
@@ -396,6 +423,7 @@ function renderExpiriesTab(body) {
   groups.forEach(function (g) {
     var list = cs.filter(function (c) { var d = daysLeft(c.expire_iso); return d !== null && g[1](d); });
     if (!list.length) return;
+    list.sort(byDue_);
     html += '<div class="section-title" style="color:' + g[2] + '">' + g[0] + ' (' + list.length + ')</div>';
     html += list.map(function (c) {
       return '<div class="card tap" data-name="' + esc(c.name) + '"><div class="row-flex">' +
