@@ -753,6 +753,10 @@ function renderBillForm(app, params) {
     }
     var endISO = c.expire_iso ? periodEndISO(c.expire_iso, m) : null;
     if (!confirm('Bill ' + c.name + '?\n\nInvoice: next number in FY\nInvoice date: ' + (invDate ? isoToDMY(invDate) : 'today') + '\nAmount: ' + money(amt) + ' (+9% CGST + 9% SGST)\nNew expiry: ' + (endISO ? isoToDMY(endISO) : '?') + '\n\nThis updates the Google Sheet and generates the PDF.')) return;
+    // loading button: takes ~10-15s (edit + settle delays + PDF export)
+    var btn = $('#doBill');
+    btn.disabled = true;
+    btn.innerHTML = '<span class="mini-spinner"></span>Generating bill & PDF…';
     busy(true, 'Billing… generating PDF…');
     api('bill_customer', {
       customer: c.name,
@@ -774,6 +778,8 @@ function renderBillForm(app, params) {
       refreshData(false);
     }).catch(function (e) {
       busy(false);
+      btn.disabled = false;
+      btn.innerHTML = '🧾 Update Bill &amp; Advance Expiry';
       toast('Bill failed: ' + e.message, true);
     });
   };
