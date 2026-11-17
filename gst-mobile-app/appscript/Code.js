@@ -1412,11 +1412,16 @@ function dmyToISO_(s) {
  *  Editable: buyer name, address, GSTIN/UIN, invoice date, user id, bill
  *  period, service description, amount (CGST/SGST/total/words recompute).
  *  NOT editable: invoice no (later bills chain off it).
- *  Pipeline: edit the customer's doc to the EDITED values -> export via the
- *  copy trick (fresh render) -> replace that bill's archived PDF -> if the
- *  doc was showing a LATER bill, restore the doc to that later bill's values.
- *  Sheet: the same GST RECORDS row is updated; UPCOMING BILLS expiry/
- *  duration only when the edited bill is the customer's latest. */
+ *  RENAMING touches ONLY the doc/PDF — never the sheet's Customer Name.
+ *  Pipeline (design by user):
+ *  - LATEST bill: edit the customer's doc IN PLACE (normal flow), export
+ *    fresh (copy-trick), replace that bill's archived PDF; UPCOMING BILLS
+ *    expiry/duration follow the new period end.
+ *  - OLDER bill: the doc is NEVER touched — a throwaway COPY of the doc is
+ *    edited to the old bill's corrected values, exported (fresh render) and
+ *    trashed; only the archived PDF for that invoice is replaced. The doc
+ *    keeps showing the latest bill the whole time.
+ *  Sheet: the bill's own GST RECORDS row is updated in both cases. */
 function editBill_(body) {
   var inv = String(body.invoice_no || '').trim();
   var cust = String(body.customer || '').trim();
@@ -1432,6 +1437,9 @@ function editBill_(body) {
   var gstin = String(body.gstin || '').trim();
   var newDate = parseISO_(body.invoice_date);
   var ps = parseISO_(body.period_start), pe = parseISO_(body.period_end);
+  if (!newDate) throw new Error('invoice date is required');
+  if (!(ps && pe)) throw new Error('bill period (start + end) is required — ' +
+    'read it from the bill\'s current PDF (View in the app)');
 
   var ss = SpreadsheetApp.openById(SHEET_ID);
   var gst = ss.getSheetByName(GST_SHEET);
@@ -1527,12 +1535,27 @@ function editBill_(body) {
     }
   }
 
-  // --- 5. rewrite the doc to the EDITED bill -------------------------------
-  var edit = editCustomerDoc_(docId, pairs);
+  // --- 5. render the edited bill's PDF --------------------------------------
+  // LATEST bill: edit the real doc in place, then export via copy-trick.
+  // OLDER bill: edit a THROWAWAY COPY of the doc and export that — the
+  // customer's doc is never touched, so the latest bill stays intact.
+  var edit, blob;
+  if (isLatest) {
+    edit = editCustomerDoc_(docId, pairs);
+    blob = exportFreshViaCopy_(docId);
+  } else {
+    var tmp = DriveApp.getFileById(docId).makeCopy('bill-edit-tmp-' + Date.now());
+    try {
+      Utilities.sleep(1500);                       // let the fresh copy settle
+      edit = editCustomerDoc_(tmp.getId(), pairs);
+      blob = exportPdf_(tmp.getId());              // fresh copy — no render cache
+    } finally {
+      try { tmp.setTrashed(true); } catch (e2) { /* never block on cleanup */ }
+    }
+  }
 
-  // --- 6. export a FRESH render + replace that bill's archived PDF ---------
-  var blob = exportFreshViaCopy_(docId);
-  var dateStr = String(body.invoice_date || '').replace(/-/g, '/');
+  // --- 6. replace that bill's archived PDF ---------------------------------
+  var dateStr = fmtShort_(newDate);                // dd/mm/yy
   var fname = sanitizeFile_(inv) + '_' + sanitizeFile_(dateStr).replace(/\//g, '-') + '.pdf';
   blob.setName(fname);
   var folder = customerFolder_(cust, true);
@@ -1544,23 +1567,15 @@ function editBill_(body) {
   folder.createFile(blob);
   if (oldFile) oldFile.setTrashed(true);
 
-  // --- 7. restore the doc to the LATER bill it was showing -----------------
-  if (!isLatest) {
-    var back = pairs.map(function (p) {
-      return { name: p.name, old: p.nw, nw: p.old, warn: p.warn };
-    });
-    editCustomerDoc_(docId, back);
-  }
-
-  // --- 8. sheet: same GST RECORDS row --------------------------------------
+  // --- 8. sheet: same GST RECORDS row (Customer Name is NEVER changed here —
+  //         renaming is doc/PDF only, per design) ----------------------------
   var gstNow = gst.getDataRange().getValues();      // re-read: rows may have shifted
   var rowNow = findGstRow_(gstNow, cust, inv);
   if (rowNow < 0) throw new Error('GST RECORDS row vanished while editing — re-check the sheet');
-  var gName = colOf_(gstNow[0], 'Customer Name'), gGstin = colOf_(gstNow[0], 'Customer GSTIN');
+  var gGstin = colOf_(gstNow[0], 'Customer GSTIN');
   var gDesc = colOf_(gstNow[0], 'Service Description'), gAmt = colOf_(gstNow[0], 'Amount ₹');
   var gCg = colOf_(gstNow[0], 'CGST 9% (₹)'), gSg = colOf_(gstNow[0], 'SGST 9% (₹)');
   var gTot = colOf_(gstNow[0], 'Total Amount (₹)'), gDt = colOf_(gstNow[0], 'Invoice Date');
-  if (name && gName >= 0) gst.getRange(rowNow + 1, gName + 1).setValue(name);
   if (gGstin >= 0) gst.getRange(rowNow + 1, gGstin + 1).setValue(gstin);
   if (desc && gDesc >= 0) gst.getRange(rowNow + 1, gDesc + 1).setValue(desc);
   if (gAmt >= 0) gst.getRange(rowNow + 1, gAmt + 1).setValue(amount);

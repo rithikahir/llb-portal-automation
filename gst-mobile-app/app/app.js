@@ -557,7 +557,7 @@ function renderBillEdit(app, params) {
       if (!pf || pf.ok === false) throw new Error('no prefill');
       var latestNote = pf.is_latest
         ? '<div class="card"><div class="meta-line">📌 This is the <b>latest</b> bill — the doc shows it now; editing updates the doc, PDF and expiry.</div></div>'
-        : '<div class="card"><div class="meta-line">📌 This is an <b>older</b> bill — the doc will temporarily switch to it for the PDF, then restore the latest bill automatically. Expiry on the sheet stays with the latest bill. Bill period is required (check the current PDF for it).</div></div>';
+        : '<div class="card"><div class="meta-line">📌 This is an <b>older</b> bill — its PDF is regenerated <b>directly</b>; the customer\'s Google Doc is <b>not touched</b> (the latest bill stays on it). Expiry on the sheet stays with the latest bill. Enter the bill period exactly as on the current PDF.</div></div>';
       $('#ebbody').innerHTML =
         latestNote +
         '<div class="card">' +
@@ -607,7 +607,7 @@ function renderBillEdit(app, params) {
             'Amount: ' + money(body.amount) + ' → total ' + money(tot) + '\n\n' +
             'The Google Doc and the archived PDF for THIS bill are updated.' +
             (pf.is_latest ? ' Expiry moves to the new period end.' :
-              ' The doc keeps the latest bill afterwards.'))) return;
+              ' The doc is not touched — only this bill\'s PDF is replaced.'))) return;
         busy(true, 'Editing bill… regenerating PDF…');
         api('edit_bill', body).then(function (res) {
           busy(false);
