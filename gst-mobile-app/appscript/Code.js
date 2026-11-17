@@ -1116,13 +1116,32 @@ function exportPdf_(docId) {
   throw new Error('PDF export failed — ' + firstErr);
 }
 
-/** Exports the doc to PDF and archives it under BILLS/<Customer>/. */
+/** Exports the doc to PDF and archives it under BILLS/<Customer>/.
+ *  Google's export endpoint can serve a cached, PRE-EDIT render right after
+ *  a doc is edited (seen 17/11/26: archived ST/049 PDF had old values while
+ *  the doc itself was updated). Defence: give the render a moment to settle,
+ *  do a throwaway "cache-warming" export, wait again, and archive the SECOND
+ *  export — which reflects the post-edit doc with near certainty. */
 function exportAndArchive_(docId, custName, invoiceNo, dateStr) {
+  Utilities.sleep(2500);
+  try { exportPdf_(docId); } catch (e) { /* warming pass is best-effort */ }
+  Utilities.sleep(2000);
   var blob = exportPdf_(docId);
   var fname = sanitizeFile_(invoiceNo) + '_' + sanitizeFile_(dateStr) + '.pdf';
   blob.setName(fname);
   var folder = customerFolder_(custName, true);
-  folder.createFile(blob);
+  var file = folder.createFile(blob);
+  // belt & braces: one more render a couple of seconds later; if it comes
+  // back healthy, it's the newest view of the doc — push it into the file
+  Utilities.sleep(2000);
+  try {
+    var newest = exportPdf_(docId);
+    if (newest && newest.getBytes().length > 1000) {
+      newest.setName(fname);
+      file.setBlob(newest);
+      blob = newest;
+    }
+  } catch (e) { /* keep the second-export blob */ }
   return { blob: blob, file: fname, folderUrl: folder.getUrl() };
 }
 
