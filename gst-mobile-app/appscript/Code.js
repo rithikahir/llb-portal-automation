@@ -1129,22 +1129,28 @@ function exportPdf_(docId) {
 }
 
 /** Exports the doc to PDF and archives it under BILLS/<Customer>/.
- *  Google's export endpoint serves a CACHED, PRE-EDIT render for a while
- *  after a doc is edited (17/11/26, twice: even ~7s of settling wasn't
- *  enough — the archived PDF kept the old values). So instead of guessing
- *  delays: fingerprint the PRE-EDIT render (baselineHash taken before the
- *  edit), then keep exporting until a render DIFFERS from it — a differing
- *  render is the post-edit PDF with near certainty. If the cache outlasts
- *  the retries, the file is archived anyway and a background trigger
- *  re-exports a few minutes later and overwrites it (setBlob). */
+ *  Root cause found 17/11/26: Google's export endpoint serves a CACHED,
+ *  PRE-EDIT render for MINUTES after a doc edit (twice confirmed — archived
+ *  PDFs were byte-identical to the stale render while the doc held new
+ *  values). No settle delay is long enough, and bills are shared on WhatsApp
+ *  immediately. So: fingerprint the PRE-EDIT render (baselineHash), export,
+ *  and if the render matches the fingerprint (stale), re-export via a
+ *  THROWAWAY COPY of the doc — a fresh copy has no render cache, so its
+ *  first export is always the post-edit content. Background trigger
+ *  self-heal stays as the last-resort net. */
 function exportAndArchive_(docId, custName, invoiceNo, dateStr, baselineHash) {
   var fname = sanitizeFile_(invoiceNo) + '_' + sanitizeFile_(dateStr) + '.pdf';
   var folder = customerFolder_(custName, true);
   var blob = null, settled = !baselineHash;   // no baseline -> can't verify, hope for the best
-  for (var attempt = 0; attempt < 4; attempt++) {
-    if (attempt) Utilities.sleep(attempt * 5000);   // 0s, 5s, 10s, 15s between tries
+  for (var attempt = 0; attempt < 3 && !settled; attempt++) {
+    if (attempt) Utilities.sleep(4000);
     blob = exportPdf_(docId);
     if (blobHash_(blob) !== baselineHash) { settled = true; break; }
+    // stale cached render -> try the copy trick before waiting again
+    try {
+      var viaCopy = exportFreshViaCopy_(docId);
+      if (blobHash_(viaCopy) !== baselineHash) { blob = viaCopy; settled = true; }
+    } catch (e) { /* copy pipeline failed — fall through to retry */ }
   }
   blob.setName(fname);
   var file = folder.createFile(blob);
@@ -1153,6 +1159,18 @@ function exportAndArchive_(docId, custName, invoiceNo, dateStr, baselineHash) {
                          fname: fname, baseline: baselineHash, attempts: 0 });
   }
   return { blob: blob, file: fname, folderUrl: folder.getUrl(), pdf_settled: settled };
+}
+
+/** Export a THROWAWAY COPY of the doc: a brand-new doc has no cached render,
+ *  so its first export reflects the current (post-edit) content. The copy is
+ *  trashed immediately after. */
+function exportFreshViaCopy_(docId) {
+  var copy = DriveApp.getFileById(docId).makeCopy('pdf-export-tmp-' + Date.now());
+  try {
+    return exportPdf_(copy.getId());
+  } finally {
+    try { copy.setTrashed(true); } catch (e) {}
+  }
 }
 
 /** md5 of a blob's bytes — fingerprint used to tell renders apart. */
@@ -1219,7 +1237,8 @@ function refreshPdf_(body) {
   }
   if (!found) throw new Error('no archived PDF for ' + inv + ' in BILLS/' + cust);
   var before = found.getBlob().getBytes().length;
-  var blob = exportPdf_(docId);
+  // copy-trick export: immune to the stale render cache
+  var blob = exportFreshViaCopy_(docId);
   blob.setName(found.getName());
   found.setBlob(blob);
   return { ok: true, customer: cust, invoice_no: inv, pdf_name: found.getName(),
