@@ -618,18 +618,6 @@ function listAll_(body) {
       invoices: inv2.map(stripRow_)
     });
   }
-  // doc-mapped names with NEITHER a UPCOMING row NOR a GST row — so every
-  // customer with a Google Doc on Drive shows up in the app
-  var dmap; try { dmap = JSON.parse(PROPS.getProperty('DOCS_MAP') || '{}'); } catch (e5) { dmap = {}; }
-  for (var dn in dmap) {
-    var known = customers.some(function (c9) { return nameScore_(c9.name, dn) >= 0.95; });
-    if (known) continue;
-    customers.push({
-      row: -1, name: dn, expire: '', expire_iso: '', duration: '', bill_file: '',
-      address: '', userid: '', gstin: '', last_invoice: null, invoices: [],
-      doc_only: true
-    });
-  }
   for (var c3 = 0; c3 < custs.length; c3++) {
     var r2 = custs[c3].row - 1;
     var name3 = custs[c3].name;
@@ -649,6 +637,18 @@ function listAll_(body) {
       gstin: lastInv ? lastInv.gstin : '',
       last_invoice: lastInv ? stripRow_(lastInv) : null,
       invoices: invoices.map(stripRow_)
+    });
+  }
+  // doc-mapped names with NEITHER a UPCOMING row NOR a GST row — so every
+  // customer with a Google Doc on Drive shows up in the app
+  var dmap; try { dmap = JSON.parse(PROPS.getProperty('DOCS_MAP') || '{}'); } catch (e5) { dmap = {}; }
+  for (var dn in dmap) {
+    var known = customers.some(function (c9) { return nameScore_(c9.name, dn) >= 0.95; });
+    if (known) continue;
+    customers.push({
+      row: -1, name: dn, expire: '', expire_iso: '', duration: '', bill_file: '',
+      address: '', userid: '', gstin: '', last_invoice: null, invoices: [],
+      doc_only: true
     });
   }
   customers.sort(function (a, b) {
