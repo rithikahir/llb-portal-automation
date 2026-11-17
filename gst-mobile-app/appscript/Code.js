@@ -104,6 +104,7 @@ function doPost(e) {
     if (body.action === 'update_payment') return jsonOut_(updatePayment_(body));
     if (body.action === 'refresh_pdf') return jsonOut_(refreshPdf_(body));
     if (body.action === 'bill_prefill') return jsonOut_(billPrefill_(body));
+    if (body.action === 'backfill_periods') return jsonOut_(backfillPeriods_(body));
     if (body.action === 'bill_edit_prefill') return jsonOut_(billEditPrefill_(body));
     if (body.action === 'edit_bill') return jsonOut_(editBill_(body));
     return jsonOut_({ ok: false, error: 'unknown action: ' + body.action });
@@ -120,7 +121,7 @@ function doGet() {
                               'sync_docs', 'check_docs', 'rebuild_doc',
                               'list_pdfs', 'get_pdf', 'map_doc', 'add_customer',
                     'repair_doc', 'update_payment', 'refresh_pdf',
-                    'bill_prefill', 'bill_edit_prefill', 'edit_bill',
+                    'bill_prefill', 'bill_edit_prefill', 'edit_bill', 'backfill_periods',
                               'debug_rebuild'] });
 }
 
@@ -263,13 +264,18 @@ function complete_(body) {
         log.push(name + ': no GST record to copy — NOT appended, fill manually');
         continue;
       }
-      appendGstRecord_(gst, gCols, {
+      var newPRow = appendGstRecord_(gst, gCols, {
         invoiceNo: invNo,
         invoiceDate: String(res.invoice_date || '').replace(/-/g, '/'),
         customer: last.customer, gstin: last.gstin, desc: last.desc,
         amount: last.amount, cgst: last.cgst, sgst: last.sgst, total: last.total,
         mode: last.mode
       });
+      var pExp = asDate_(res.new_expire);
+      var pMon = parseInt(res.duration_months, 10);
+      if (pExp && pMon > 0)
+        writeBillPeriod_(gst, ensureBillPeriodCol_(gst), newPRow - 1,
+          addDays_(addMonths_(pExp, -pMon), 1), pExp);
       existing[invNo] = true;
     }
 
@@ -408,6 +414,32 @@ function appendGstRecord_(gst, gCols, v) {
   dCell.setNumberFormat('@');                               // keep dd/mm/yy as text
   dCell.setValue(v.invoiceDate);
   SpreadsheetApp.flush();
+  return rowIdx;                                            // 1-based sheet row
+}
+
+/** Hidden "Bill Period" column in GST RECORDS: stores 'dd/mm/yyyy to
+ *  dd/mm/yyyy' per row — a track of every bill's period, older bills
+ *  included (the bill form's period prefill reads it). Created on first use
+ *  and hidden (users can unhide in the sheet; it will re-hide on writes). */
+function ensureBillPeriodCol_(gst) {
+  var last = gst.getLastColumn();
+  var header = gst.getRange(1, 1, 1, last).getValues()[0];
+  for (var i = 0; i < header.length; i++) {
+    if (String(header[i]).trim() === 'Bill Period') {
+      try { gst.hideColumns(i + 1); } catch (e) {}
+      return i;                                             // 0-based
+    }
+  }
+  var col = last + 1;                                       // 1-based new column
+  gst.getRange(1, col).setValue('Bill Period');
+  try { gst.hideColumns(col); } catch (e) {}
+  return col - 1;
+}
+
+/** Write one row's bill period (start/end Dates) into the hidden column. */
+function writeBillPeriod_(gst, c0, r0, ps, pe) {
+  if (c0 === null || c0 < 0 || !(r0 >= 0) || !ps || !pe) return;
+  gst.getRange(r0 + 1, c0 + 1).setValue(fmtDMY_(ps) + ' to ' + fmtDMY_(pe));
 }
 
 function nameScore_(a, b) {
@@ -738,12 +770,14 @@ function billCustomer_(body) {
     if (!existing[invoiceNo]) {
       var gCols = {};
       GST_COLUMNS.forEach(function (c) { gCols[c] = colOf_(gstVals[0], c); });
-      appendGstRecord_(gst, gCols, {
+      var newRow = appendGstRecord_(gst, gCols, {
         invoiceNo: invoiceNo,
         invoiceDate: fmtShort_(invoiceDate),
         customer: last.customer, gstin: last.gstin, desc: desc,
         amount: amount, cgst: cgst, sgst: sgst, total: total, mode: mode
       });
+      writeBillPeriod_(gst, ensureBillPeriodCol_(gst), newRow - 1,
+        addDays_(addMonths_(periodEnd, -months), 1), periodEnd);
       appended = true;
     }
 
@@ -1379,14 +1413,17 @@ function billEditPrefill_(body) {
   try { if (docId) docText = docText_(docId); } catch (e) { /* ignore */ }
   var isLatest = !!docText && docText.indexOf(inv) >= 0;
 
-  // period prefill: latest bill -> the doc's own period line; older bill ->
-  // derived from the invoice date + duration (a best guess the user corrects)
+  // period prefill: 1) the hidden "Bill Period" sheet column (authoritative
+  // track) 2) the doc's own period line (latest bill) 3) derived guess
   var ps = null, pe = null;
+  var pCell = String(gstVals[row][ensureBillPeriodCol_(gst)] || '');
+  var pM = pCell.match(/(\d{2}\/\d{2}\/\d{4}) to (\d{2}\/\d{2}\/\d{4})/);
+  if (pM) { ps = dmyToISO_(pM[1]); pe = dmyToISO_(pM[2]); }
   var perM = docText.match(/\d{2}\/\d{2}\/\d{4} to \d{2}\/\d{2}\/\d{4}/);
-  if (isLatest && perM) {
+  if (!ps && isLatest && perM) {
     var pp = perM[0].split(' to ');
     ps = dmyToISO_(pp[0]); pe = dmyToISO_(pp[1]);
-  } else if (rec.date) {
+  } else if (!ps && rec.date) {
     ps = rec.date;
     if (months > 0) pe = iso_(addDays_(addMonths_(asDate_(ps), months), -1));
   }
@@ -1398,6 +1435,39 @@ function billEditPrefill_(body) {
     doc_desc: docDescBlock_(docText),
     period_start: ps || '', period_end: pe || '', months: months
   };
+}
+
+/** backfill_periods: one-time heal — write each mapped customer's doc period
+ *  line into the hidden "Bill Period" column on that bill's GST row. Only
+ *  the LATEST bill per customer can be filled this way (the doc shows only
+ *  it); older rows fill as bills get edited from the app. */
+function backfillPeriods_(body) {
+  var ss = SpreadsheetApp.openById(SHEET_ID);
+  var gst = ss.getSheetByName(GST_SHEET);
+  var map;
+  try { map = JSON.parse(PROPS.getProperty('DOCS_MAP') || '{}'); } catch (e) { map = {}; }
+  var c0 = ensureBillPeriodCol_(gst);
+  var filled = 0, skipped = [];
+  var gstVals = gst.getDataRange().getValues();
+  var iNo = colOf_(gstVals[0], 'Invoice No');
+  for (var cust in map) {
+    var text = '';
+    try { text = docText_(map[cust]); } catch (e) { skipped.push(cust + ': doc unread'); continue; }
+    var perM = text.match(/\d{2}\/\d{2}\/\d{4} to \d{2}\/\d{2}\/\d{4}/);
+    var invM = text.match(/[A-Z]{2,5}\/\d{2,4}\/\d{2,4}-\d{2,4}/) || text.match(/ST\/\d+\/[\d-]+/);
+    if (!perM || !invM) { skipped.push(cust + ': no period/invoice line in doc'); continue; }
+    var wrote = false;
+    for (var r = 1; r < gstVals.length; r++) {
+      if (String(gstVals[r][iNo] || '').trim() === invM[0]) {
+        gst.getRange(r + 1, c0 + 1).setValue(perM[0]);
+        gstVals[r][c0] = perM[0];
+        filled++; wrote = true;
+        break;
+      }
+    }
+    if (!wrote) skipped.push(cust + ': ' + invM[0] + ' not found in GST RECORDS');
+  }
+  return { ok: true, filled: filled, skipped: skipped };
 }
 
 /** 'dd/mm/yyyy' -> 'yyyy-mm-dd' */
@@ -1587,6 +1657,7 @@ function editBill_(body) {
     dCell.setNumberFormat('dd/mm/yy');
     dCell.setValue(newDate);
   }
+  if (ps && pe) writeBillPeriod_(gst, ensureBillPeriodCol_(gst), rowNow, ps, pe);
 
   // --- 9. latest bill only: UPCOMING BILLS expiry / duration follow --------
   var upUpdated = false;
@@ -1804,11 +1875,12 @@ function addCustomer_(body) {
   saveDocsMap_(map);
   var gCols = {};
   GST_COLUMNS.forEach(function (cc) { gCols[cc] = colOf_(gstVals[0], cc); });
-  appendGstRecord_(gst, gCols, {
+  var firstRow = appendGstRecord_(gst, gCols, {
     invoiceNo: invoiceNo, invoiceDate: fmtShort_(today), customer: sheetName,
     gstin: gstin, desc: desc, amount: amount, cgst: cgst, sgst: sgst,
     total: total, mode: mode, payment_status: 'Paid'
   });
+  writeBillPeriod_(gst, ensureBillPeriodCol_(gst), firstRow - 1, periodStart, periodEnd);
 
   var newRow = up.getLastRow() + 1;
   up.getRange(newRow, iName + 1).setValue(sheetName);
