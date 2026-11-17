@@ -454,6 +454,24 @@ function renderCustomersTab(body) {
 function isPaidCust_(c) {
   return !!(c.last_invoice && String(c.last_invoice.status || '').toLowerCase() === 'paid');
 }
+function payStamp_(c) {
+  var s = String(c.last_invoice && c.last_invoice.payment_date || '').trim();
+  if (!s) return 0;
+  var t = Date.parse(s);
+  if (!isNaN(t)) return t;
+  var m = s.match(/(\d{1,2})\/(\d{1,2})\/(\d{2,4})/);        // dd/mm/yy text
+  if (m) {
+    var y = Number(m[3]); if (y < 100) y += 2000;
+    return new Date(y, Number(m[2]) - 1, Number(m[1])).getTime();
+  }
+  return 0;
+}
+function custRank_(c, paidFirst) {
+  var st = String(c.last_invoice && c.last_invoice.status || '').toLowerCase();
+  if (st === 'cancelled') return 2;                          // always last
+  if (st === 'paid') return paidFirst ? 0 : 1;
+  return paidFirst ? 1 : 0;                                  // pending / no invoice
+}
 function fillCustomerList(root, query) {
   if (!state.data) {
     root.innerHTML = '<div class="empty"><div class="big">📭</div>No data yet.</div>';
@@ -467,9 +485,16 @@ function fillCustomerList(root, query) {
   if (state._custSort === 'pending' || state._custSort === 'paid') {
     var paidFirst = state._custSort === 'paid';
     cs = cs.slice().sort(function (a, b) {
-      var pa = isPaidCust_(a), pb = isPaidCust_(b);
-      if (pa === pb) return 0;                       // stable: keep default order
-      return (pa === paidFirst) ? -1 : 1;
+      var ra = custRank_(a, paidFirst), rb = custRank_(b, paidFirst);
+      if (ra !== rb) return ra - rb;
+      // inside the PAID group: most recent payment date first
+      var sa = String(a.last_invoice && a.last_invoice.status || '').toLowerCase();
+      var sb = String(b.last_invoice && b.last_invoice.status || '').toLowerCase();
+      if (sa === 'paid' && sb === 'paid') {
+        var ta = payStamp_(a), tb = payStamp_(b);
+        if (ta !== tb) return tb - ta;
+      }
+      return 0;                          // stable: keep default order otherwise
     });
   }
   root.innerHTML = cs.length
