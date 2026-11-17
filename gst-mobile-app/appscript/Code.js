@@ -1133,24 +1133,33 @@ function exportPdf_(docId) {
  *  PRE-EDIT render for MINUTES after a doc edit (twice confirmed — archived
  *  PDFs were byte-identical to the stale render while the doc held new
  *  values). No settle delay is long enough, and bills are shared on WhatsApp
- *  immediately. So: fingerprint the PRE-EDIT render (baselineHash), export,
- *  and if the render matches the fingerprint (stale), re-export via a
- *  THROWAWAY COPY of the doc — a fresh copy has no render cache, so its
- *  first export is always the post-edit content. Background trigger
- *  self-heal stays as the last-resort net. */
+ *  immediately. So the PRIMARY path is the copy trick: make a throwaway COPY
+ *  of the doc and export that — a fresh copy has no render cache, so its
+ *  first export is always the post-edit content. (Trying the main doc's
+ *  export first was pointless: right after an edit its cache is essentially
+ *  always stale, so the cheap call failed its freshness check every time and
+ *  only added delay.) The pre-edit fingerprint verification and background
+ *  trigger self-heal stay as safety nets. */
 function exportAndArchive_(docId, custName, invoiceNo, dateStr, baselineHash) {
   var fname = sanitizeFile_(invoiceNo) + '_' + sanitizeFile_(dateStr) + '.pdf';
   var folder = customerFolder_(custName, true);
-  var blob = null, settled = !baselineHash;   // no baseline -> can't verify, hope for the best
-  for (var attempt = 0; attempt < 3 && !settled; attempt++) {
-    if (attempt) Utilities.sleep(4000);
-    blob = exportPdf_(docId);
-    if (blobHash_(blob) !== baselineHash) { settled = true; break; }
-    // stale cached render -> try the copy trick before waiting again
-    try {
-      var viaCopy = exportFreshViaCopy_(docId);
-      if (blobHash_(viaCopy) !== baselineHash) { blob = viaCopy; settled = true; }
-    } catch (e) { /* copy pipeline failed — fall through to retry */ }
+  var blob = null, settled = true;
+  try { blob = exportFreshViaCopy_(docId); }          // primary: cache-immune
+  catch (e) { blob = null; }
+  if (!blob) blob = exportPdf_(docId);                // rare fallback
+  // verify against the pre-edit fingerprint; if somehow still identical,
+  // retry a few times (direct, then copy again) before archiving
+  if (baselineHash && blobHash_(blob) === baselineHash) {
+    settled = false;
+    for (var attempt = 0; attempt < 3 && !settled; attempt++) {
+      Utilities.sleep(4000);
+      blob = exportPdf_(docId);
+      if (blobHash_(blob) !== baselineHash) { settled = true; break; }
+      try {
+        var viaCopy = exportFreshViaCopy_(docId);
+        if (blobHash_(viaCopy) !== baselineHash) { blob = viaCopy; settled = true; }
+      } catch (e) { /* next round */ }
+    }
   }
   blob.setName(fname);
   var file = folder.createFile(blob);
