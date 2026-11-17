@@ -1381,12 +1381,13 @@ function billEditPrefill_(body) {
   GST_COLUMNS.forEach(function (c) { gCols[c] = colOf_(gstVals[0], c); });
   var row = findGstRow_(gstVals, cust, inv);
   if (row < 0) throw new Error('no GST RECORDS row with invoice ' + inv + ' for ' + cust);
+  var dParsed = gCols['Invoice Date'] >= 0 ? asDate_(gstVals[row][gCols['Invoice Date']]) : null;
   var rec = {
     name: String(gstVals[row][gCols['Customer Name']] || '').trim(),
     gstin: String(gstVals[row][gCols['Customer GSTIN']] || '').trim(),
     desc: String(gstVals[row][gCols['Service Description']] || '').trim(),
     amount: num_(gstVals[row][gCols['Amount ₹']]),
-    date: gCols['Invoice Date'] >= 0 ? iso_(asDate_(gstVals[row][gCols['Invoice Date']])) : ''
+    date: dParsed ? iso_(dParsed) : ''
   };
 
   // UPCOMING BILLS row: address / user id / expiry / duration live there
@@ -1423,9 +1424,9 @@ function billEditPrefill_(body) {
   if (!ps && isLatest && perM) {
     var pp = perM[0].split(' to ');
     ps = dmyToISO_(pp[0]); pe = dmyToISO_(pp[1]);
-  } else if (!ps && rec.date) {
+  } else if (!ps && dParsed) {
     ps = rec.date;
-    if (months > 0) pe = iso_(addDays_(addMonths_(asDate_(ps), months), -1));
+    if (months > 0) pe = iso_(addDays_(addMonths_(dParsed, months), -1));
   }
   return {
     ok: true, customer: cust, invoice_no: inv, is_latest: isLatest,
