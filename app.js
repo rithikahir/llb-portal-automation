@@ -156,6 +156,62 @@ function shareBlob(blob, name) {
 
 /* ------------------------------------------------------------ navigation */
 var stack = [];   // [{fn, params}]
+
+// screens are re-identifiable by id so the stack survives a page reload —
+// refreshing mid-task lands back on the SAME page instead of home
+var SCREEN_ID = {
+  renderTab: 'tab',
+  renderCustomerDetail: 'cust',
+  renderAddCustomer: 'addcust',
+  renderBillForm: 'billform',
+  renderBillEdit: 'billedit',
+  renderPaymentEdit: 'payedit',
+  renderSetup: 'setup'
+};
+function slimScreen_(fnName, p) {
+  if (fnName === 'renderTab') return { tab: p.tab || 'today' };
+  if (fnName === 'renderCustomerDetail' || fnName === 'renderBillForm') return { name: p.name };
+  if (fnName === 'renderBillEdit' || fnName === 'renderPaymentEdit')
+    return { name: p.name || (p.c && p.c.name), invoice_no: p.inv && p.inv.invoice_no };
+  return {};
+}
+function saveStack_() {
+  try {
+    sessionStorage.setItem('gst_stack', JSON.stringify(stack.map(function (s) {
+      return { k: SCREEN_ID[s.fn.name] || '', p: slimScreen_(s.fn.name, s.params || {}) };
+    })));
+  } catch (e) { }
+}
+function rebuildScreen_(k, p) {
+  if (k === 'tab') return { fn: renderTab, params: { tab: p.tab || 'today' } };
+  if (k === 'cust' && p.name) return { fn: renderCustomerDetail, params: { name: p.name } };
+  if (k === 'addcust') return { fn: renderAddCustomer, params: {} };
+  if (k === 'billform' && p.name) return { fn: renderBillForm, params: { name: p.name } };
+  if ((k === 'billedit' || k === 'payedit') && p.name) {
+    var c = null;
+    if (state.data) c = state.data.customers.filter(function (x) { return x.name === p.name; })[0];
+    if (!c) return { fn: renderCustomerDetail, params: { name: p.name } };
+    var inv = p.invoice_no ? c.invoices.filter(function (x) { return x.invoice_no === p.invoice_no; })[0] : null;
+    if (!inv) return { fn: renderCustomerDetail, params: { name: p.name } };
+    return { fn: k === 'billedit' ? renderBillEdit : renderPaymentEdit, params: { c: c, inv: inv } };
+  }
+  return null;                                   // unknown screen -> home
+}
+function restoreStack_() {
+  try {
+    var saved = JSON.parse(sessionStorage.getItem('gst_stack') || 'null');
+    if (!saved || !saved.length) return false;
+    var rebuilt = [];
+    for (var i = 0; i < saved.length; i++) {
+      var s = rebuildScreen_(saved[i].k, saved[i].p || {});
+      if (!s) return false;
+      rebuilt.push(s);
+    }
+    stack = rebuilt;
+    return true;
+  } catch (e) { return false; }
+}
+
 function go(fn, params) {
   stack.push({ fn: fn, params: params || {} });
   try { history.pushState({ d: stack.length }, ''); } catch (e) { }
@@ -176,6 +232,7 @@ window.addEventListener('popstate', function () {
   }
 });
 function renderTop() {
+  saveStack_();                                  // every navigation is persisted
   var top = stack[stack.length - 1];
   var app = $('#app');
   app.innerHTML = '';
@@ -1104,7 +1161,7 @@ if (!state.cfg) {
   stack = [{ fn: renderSetup }];
   renderTop();
 } else {
-  stack = [{ fn: renderTab, params: { tab: 'today' } }];
+  if (!restoreStack_()) stack = [{ fn: renderTab, params: { tab: 'today' } }];
   renderTop();
   refreshData(false);
 }
