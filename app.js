@@ -384,10 +384,20 @@ function renderCustomersTab(body) {
   body.innerHTML = '<div class="wrap">' +
     '<div class="search"><span class="si">🔍</span>' +
     '<input id="q" placeholder="Search name, user id, GSTIN…" value="' + esc(state._q || '') + '"></div>' +
+    '<div class="sort-row"><span class="meta-line">Sort</span>' +
+    '<select id="csort" class="sort-sel">' +
+    '<option value="default"' + (state._custSort === 'default' || !state._custSort ? ' selected' : '') + '>Default</option>' +
+    '<option value="pending"' + (state._custSort === 'pending' ? ' selected' : '') + '>Pending first</option>' +
+    '<option value="paid"' + (state._custSort === 'paid' ? ' selected' : '') + '>Paid first</option>' +
+    '</select></div>' +
     '<div id="clist"></div></div>';
-  var q = $('#q');
+  var q = $('#q'), sel = $('#csort');
   q.oninput = function () { state._q = q.value; fillCustomerList($('#clist'), q.value); };
+  sel.onchange = function () { state._custSort = sel.value; fillCustomerList($('#clist'), q.value); };
   fillCustomerList($('#clist'), state._q || '');
+}
+function isPaidCust_(c) {
+  return !!(c.last_invoice && String(c.last_invoice.status || '').toLowerCase() === 'paid');
 }
 function fillCustomerList(root, query) {
   if (!state.data) {
@@ -399,6 +409,14 @@ function fillCustomerList(root, query) {
     if (!q) return true;
     return (c.name + ' ' + c.userid + ' ' + c.gstin).toLowerCase().indexOf(q) >= 0;
   });
+  if (state._custSort === 'pending' || state._custSort === 'paid') {
+    var paidFirst = state._custSort === 'paid';
+    cs = cs.slice().sort(function (a, b) {
+      var pa = isPaidCust_(a), pb = isPaidCust_(b);
+      if (pa === pb) return 0;                       // stable: keep default order
+      return (pa === paidFirst) ? -1 : 1;
+    });
+  }
   root.innerHTML = cs.length
     ? cs.map(function (c) { return customerCard(c); }).join('')
     : '<div class="empty"><div class="big">🔎</div>No customers match.</div>';
@@ -486,7 +504,9 @@ function detailBody(c) {
     '</div>' +
     (c.bill_file ? '<div class="small" style="margin-top:4px">Bill file: ' + esc(c.bill_file) + '</div>' : '') +
     (c.address ? '<div class="small" style="margin-top:4px;white-space:pre-line">📍 ' + esc(c.address) + '</div>' : '') +
-    '<div class="btn-row"><button class="btn primary" id="billnow" style="margin-top:6px">🧾 Update Bill / Bill Now</button></div>' +
+    (c.expire_iso
+      ? '<div class="btn-row"><button class="btn primary" id="billnow" style="margin-top:6px">🧾 Update Bill / Bill Now</button></div>'
+      : '<div class="small" style="margin-top:8px;color:var(--muted)">One-time bill customer — no renewal row on the sheet, so there is nothing to bill here. Invoices and PDFs stay fully available.</div>') +
     '</div>';
 
   var hist = '<div class="section-title">Invoice history (' + c.invoices.length + ')</div>';
