@@ -1256,8 +1256,8 @@ function refreshPdf_(body) {
   var nf = parent ? parent.createFile(blob) : DriveApp.getRootFolder().createFile(blob);
   found.setTrashed(true);
   return { ok: true, customer: cust, invoice_no: inv, pdf_name: found.getName(),
-           old_bytes: before, new_bytes: nf.getBytes().length,
-           changed: before !== nf.getBytes().length };
+           old_bytes: before, new_bytes: blob.getBytes().length,
+           changed: before !== blob.getBytes().length };
 }
 
 /** The new bill pipeline: edit doc in place -> export -> archive. */
