@@ -539,28 +539,39 @@ function listAll_(body) {
   gstRows.sort(function (a, b) { return (b._date ? b._date.getTime() : 0) - (a._date ? a._date.getTime() : 0); });
 
   var customers = [];
+  var custs = [];
   for (var r = 1; r < upVals.length; r++) {
     var name = String(upVals[r][iName] || '').trim();
-    var expire = asDate_(upVals[r][iExp]);
     if (!name) continue;
-
-    // fuzzy-match this customer against every gst row (same scoring the
-    // desktop billing uses to copy data), keep score > 0, newest first
-    var invoices = [];
-    for (var k = 0; k < gstRows.length; k++) {
-      if (nameScore_(name, gstRows[k].customer) > 0) invoices.push(gstRows[k]);
+    custs.push({ row: r + 1, name: name, invoices: [] });
+  }
+  // Each gst row belongs to its BEST-matching customer ONLY. Plain fuzzy
+  // matching would hand "Dilip K Jain & Associates 1" and "…2" each other's
+  // bills — the names differ by one character, similarity ~0.95.
+  for (var k = 0; k < gstRows.length; k++) {
+    var best = -1, bestScore = 0;
+    for (var c2 = 0; c2 < custs.length; c2++) {
+      var s = nameScore_(custs[c2].name, gstRows[k].customer);
+      if (s > bestScore) { bestScore = s; best = c2; }
     }
+    if (best >= 0) custs[best].invoices.push(gstRows[k]);  // gstRows pre-sorted newest first
+  }
+  for (var c3 = 0; c3 < custs.length; c3++) {
+    var r2 = custs[c3].row - 1;
+    var name3 = custs[c3].name;
+    var expire = asDate_(upVals[r2][iExp]);
+    var invoices = custs[c3].invoices;
     var lastInv = invoices.length ? invoices[0] : null;
 
     customers.push({
-      row: r + 1,
-      name: name,
+      row: custs[c3].row,
+      name: name3,
       expire: expire ? fmtDMY_(expire) : '',
       expire_iso: expire ? iso_(expire) : '',
-      duration: iDur >= 0 ? String(upVals[r][iDur] || '').trim() : '',
-      bill_file: iFile >= 0 ? String(upVals[r][iFile] || '').trim() : '',
-      address: iAddr >= 0 ? String(upVals[r][iAddr] || '').trim() : '',
-      userid: iUser >= 0 ? String(upVals[r][iUser] || '').trim() : '',
+      duration: iDur >= 0 ? String(upVals[r2][iDur] || '').trim() : '',
+      bill_file: iFile >= 0 ? String(upVals[r2][iFile] || '').trim() : '',
+      address: iAddr >= 0 ? String(upVals[r2][iAddr] || '').trim() : '',
+      userid: iUser >= 0 ? String(upVals[r2][iUser] || '').trim() : '',
       gstin: lastInv ? lastInv.gstin : '',
       last_invoice: lastInv ? stripRow_(lastInv) : null,
       invoices: invoices.map(stripRow_)
