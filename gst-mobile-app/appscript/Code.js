@@ -103,6 +103,9 @@ function doPost(e) {
     if (body.action === 'repair_doc') return jsonOut_(repairDoc_(body));
     if (body.action === 'update_payment') return jsonOut_(updatePayment_(body));
     if (body.action === 'refresh_pdf') return jsonOut_(refreshPdf_(body));
+    if (body.action === 'bill_prefill') return jsonOut_(billPrefill_(body));
+    if (body.action === 'bill_edit_prefill') return jsonOut_(billEditPrefill_(body));
+    if (body.action === 'edit_bill') return jsonOut_(editBill_(body));
     return jsonOut_({ ok: false, error: 'unknown action: ' + body.action });
   } catch (err) {
     return jsonOut_({ ok: false, error: String(err && err.message || err) });
@@ -117,6 +120,7 @@ function doGet() {
                               'sync_docs', 'check_docs', 'rebuild_doc',
                               'list_pdfs', 'get_pdf', 'map_doc', 'add_customer',
                     'repair_doc', 'update_payment', 'refresh_pdf',
+                    'bill_prefill', 'bill_edit_prefill', 'edit_bill',
                               'debug_rebuild'] });
 }
 
@@ -1267,6 +1271,336 @@ function refreshPdf_(body) {
   return { ok: true, customer: cust, invoice_no: inv, pdf_name: found.getName(),
            old_bytes: before, new_bytes: blob.getBytes().length,
            changed: before !== blob.getBytes().length };
+}
+
+/* ------------------------------------------------------- edit an old bill - */
+
+/** Locate ONE GST RECORDS row: invoice no + best fuzzy customer match
+ *  (invoice numbers are not unique across customers). Returns the row index
+ *  into gstVals (0-based) or -1. */
+function findGstRow_(gstVals, cust, invNo) {
+  var iName = colOf_(gstVals[0], 'Customer Name');
+  var row = -1, best = 0;
+  for (var r = 1; r < gstVals.length; r++) {
+    if (String(gstVals[r][0] || '').trim() !== invNo) continue;
+    var s = nameScore_(cust, String(gstVals[r][iName] || ''));
+    if (s > best) { best = s; row = r; }
+  }
+  return row;
+}
+
+/** 'yyyy-mm-dd' -> Date (start of day) or null. */
+function parseISO_(s) {
+  var m = String(s || '').trim().match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  return m ? new Date(Number(m[1]), Number(m[2]) - 1, Number(m[3])) : null;
+}
+
+/** whole months between two dates s..e when e = s + m months - 1, else 0. */
+function monthsBetween_(s, e) {
+  if (!s || !e) return 0;
+  for (var m = 1; m <= 120; m++) {
+    if (addDays_(addMonths_(s, m), -1).getTime() === e.getTime()) return m;
+  }
+  return 0;
+}
+
+/** The plan-description block printed on the doc (the shouty lines, e.g.
+ *  "HIGH SPEED 200 MBPS\nTRULY UNLIMITED 12 MONTHS."). Used as the bill-form
+ *  prefill (exact PDF text) and as the old-value anchor when editing. */
+function docDescBlock_(text) {
+  var lines = String(text || '').split('\n');
+  var best = [], cur = [];
+  for (var i = 0; i <= lines.length; i++) {
+    var s = i < lines.length ? lines[i].trim() : '';
+    var ok = s.length >= 8 && !/[a-z]/.test(s) && /[A-Z]/.test(s) &&
+             /MBPS|PLAN|SPEED|UNLIMITED|BROADBAND|FIBER|FIBRE/.test(s);
+    if (ok) cur.push(s);
+    else { if (cur.length > best.length) best = cur; cur = []; }
+  }
+  return best.join('\n');
+}
+
+/** bill_prefill: the Service Description EXACTLY as the customer's doc (and
+ *  therefore their PDFs) show it — for the renewal bill form.
+ *  body: { customer } */
+function billPrefill_(body) {
+  var cust = String(body.customer || '').trim();
+  var desc = '';
+  var docId = customerDocId_(cust);
+  if (docId) {
+    try { desc = docDescBlock_(docText_(docId)); } catch (e) { /* doc read failed */ }
+  }
+  return { ok: true, customer: cust, desc: desc };
+}
+
+/** bill_edit_prefill: everything the edit-bill form needs for ONE existing
+ *  bill. body: { customer, invoice_no } */
+function billEditPrefill_(body) {
+  var cust = String(body.customer || '').trim();
+  var inv = String(body.invoice_no || '').trim();
+  if (!cust || !inv) throw new Error('customer and invoice_no are required');
+  var ss = SpreadsheetApp.openById(SHEET_ID);
+  var gst = ss.getSheetByName(GST_SHEET);
+  var up = ss.getSheetByName(UPCOMING_SHEET);
+  var gstVals = gst.getDataRange().getValues();
+  var gCols = {};
+  GST_COLUMNS.forEach(function (c) { gCols[c] = colOf_(gstVals[0], c); });
+  var row = findGstRow_(gstVals, cust, inv);
+  if (row < 0) throw new Error('no GST RECORDS row with invoice ' + inv + ' for ' + cust);
+  var rec = {
+    name: String(gstVals[row][gCols['Customer Name']] || '').trim(),
+    gstin: String(gstVals[row][gCols['Customer GSTIN']] || '').trim(),
+    desc: String(gstVals[row][gCols['Service Description']] || '').trim(),
+    amount: num_(gstVals[row][gCols['Amount ₹']]),
+    date: gCols['Invoice Date'] >= 0 ? iso_(asDate_(gstVals[row][gCols['Invoice Date']])) : ''
+  };
+
+  // UPCOMING BILLS row: address / user id / expiry / duration live there
+  var upVals = up.getDataRange().getValues();
+  var iName = colOf_(upVals[0], 'Customer name'), iExp = colOf_(upVals[0], 'Expire Date');
+  var iDur = colOf_(upVals[0], COL_DURATION), iAddr = colOf_(upVals[0], COL_ADDRESS);
+  var iUser = colOf_(upVals[0], COL_USERID);
+  var upRow = -1, best = 0;
+  for (var r = 1; r < upVals.length; r++) {
+    var s = nameScore_(cust, String(upVals[r][iName] || ''));
+    if (s > best) { best = s; upRow = r; }
+  }
+  var address = upRow >= 0 && iAddr >= 0 ? String(upVals[upRow][iAddr] || '').trim() : '';
+  var userid = upRow >= 0 && iUser >= 0 ? String(upVals[upRow][iUser] || '').trim() : '';
+  var months = upRow >= 0 && iDur >= 0 ? parseDuration_(String(upVals[upRow][iDur] || '')) : 0;
+  if (!(months > 0)) {
+    var dm = rec.desc.match(/(\d+)\s*month/i);
+    if (dm) months = parseInt(dm[1], 10);
+  }
+
+  // is this the bill the doc currently shows? (doc holds the LATEST bill)
+  var docId = customerDocId_(cust) || customerDocId_(rec.name);
+  var docText = '';
+  try { if (docId) docText = docText_(docId); } catch (e) { /* ignore */ }
+  var isLatest = !!docText && docText.indexOf(inv) >= 0;
+
+  // period prefill: latest bill -> the doc's own period line; older bill ->
+  // derived from the invoice date + duration (a best guess the user corrects)
+  var ps = null, pe = null;
+  var perM = docText.match(/\d{2}\/\d{2}\/\d{4} to \d{2}\/\d{2}\/\d{4}/);
+  if (isLatest && perM) {
+    var pp = perM[0].split(' to ');
+    ps = dmyToISO_(pp[0]); pe = dmyToISO_(pp[1]);
+  } else if (rec.date) {
+    ps = rec.date;
+    if (months > 0) pe = iso_(addDays_(addMonths_(asDate_(ps), months), -1));
+  }
+  return {
+    ok: true, customer: cust, invoice_no: inv, is_latest: isLatest,
+    name: rec.name, gstin: rec.gstin, userid: userid, address: address,
+    invoice_date: rec.date, amount: rec.amount,
+    desc: (isLatest && docDescBlock_(docText)) ? docDescBlock_(docText) : rec.desc,
+    doc_desc: docDescBlock_(docText),
+    period_start: ps || '', period_end: pe || '', months: months
+  };
+}
+
+/** 'dd/mm/yyyy' -> 'yyyy-mm-dd' */
+function dmyToISO_(s) {
+  var m = String(s || '').trim().match(/^(\d{2})\/(\d{2})\/(\d{4})$/);
+  if (!m) return '';
+  var d = new Date(Number(m[3]), Number(m[2]) - 1, Number(m[1]));
+  return iso_(d);
+}
+
+/** edit_bill: edit an EXISTING bill end-to-end.
+ *  Editable: buyer name, address, GSTIN/UIN, invoice date, user id, bill
+ *  period, service description, amount (CGST/SGST/total/words recompute).
+ *  NOT editable: invoice no (later bills chain off it).
+ *  Pipeline: edit the customer's doc to the EDITED values -> export via the
+ *  copy trick (fresh render) -> replace that bill's archived PDF -> if the
+ *  doc was showing a LATER bill, restore the doc to that later bill's values.
+ *  Sheet: the same GST RECORDS row is updated; UPCOMING BILLS expiry/
+ *  duration only when the edited bill is the customer's latest. */
+function editBill_(body) {
+  var inv = String(body.invoice_no || '').trim();
+  var cust = String(body.customer || '').trim();
+  if (!cust || !inv) throw new Error('customer and invoice_no are required');
+  var amount = parseFloat(body.amount);
+  if (!(amount > 0)) throw new Error('amount is required');
+  var cgst = round2_(amount * 0.09), sgst = round2_(amount * 0.09);
+  var total = round2_(amount + cgst + sgst);
+  var desc = String(body.desc || '').trim();
+  var name = String(body.name || '').trim();
+  var address = String(body.address || '').trim();
+  var userid = String(body.userid || '').trim();
+  var gstin = String(body.gstin || '').trim();
+  var newDate = parseISO_(body.invoice_date);
+  var ps = parseISO_(body.period_start), pe = parseISO_(body.period_end);
+
+  var ss = SpreadsheetApp.openById(SHEET_ID);
+  var gst = ss.getSheetByName(GST_SHEET);
+  var up = ss.getSheetByName(UPCOMING_SHEET);
+  var gstVals = gst.getDataRange().getValues();
+  var gCols = {};
+  GST_COLUMNS.forEach(function (c) { gCols[c] = colOf_(gstVals[0], c); });
+
+  // --- 1. the bill's GST row ------------------------------------------------
+  var row = findGstRow_(gstVals, cust, inv);
+  if (row < 0) throw new Error('no GST RECORDS row with invoice ' + inv + ' for ' + cust);
+  var billCust = String(gstVals[row][gCols['Customer Name']] || '').trim();
+
+  // --- 2. the customer's doc ------------------------------------------------
+  var docId = customerDocId_(cust) || customerDocId_(billCust);
+  if (!docId) throw new Error('no Google Doc mapped for ' + cust + '/' + billCust);
+  var before = docText_(docId);
+  var isLatest = before.indexOf(inv) >= 0;   // doc currently shows THIS bill
+  if (!isLatest && !(ps && pe)) {
+    throw new Error('this is not the latest bill — the Bill Period (start + end) is ' +
+      'required so the doc can be temporarily rewritten and restored');
+  }
+
+  // --- 3. the bill the doc CURRENTLY shows (old-value anchors + restore) ----
+  var docInvM = before.match(/[A-Z]{2,5}\/\d{2,4}\/\d{2,4}-\d{2,4}/) ||
+                before.match(/ST\/\d+\/[\d-]+/);
+  var docRow = null;
+  if (docInvM) {
+    for (var r2 = 1; r2 < gstVals.length; r2++) {
+      if (String(gstVals[r2][0] || '').trim() === docInvM[0]) {
+        docRow = {
+          invoiceNo: docInvM[0],
+          invoiceDate: asDate_(gstVals[r2][gCols['Invoice Date']]),
+          customer: String(gstVals[r2][gCols['Customer Name']] || '').trim(),
+          gstin: String(gstVals[r2][gCols['Customer GSTIN']] || '').trim(),
+          amount: num_(gstVals[r2][gCols['Amount ₹']]),
+          cgst: num_(gstVals[r2][gCols['CGST 9% (₹)']]),
+          sgst: num_(gstVals[r2][gCols['SGST 9% (₹)']]),
+          total: num_(gstVals[r2][gCols['Total Amount (₹)']])
+        };
+        break;
+      }
+    }
+  }
+  if (!docRow) throw new Error('could not identify the bill the doc currently shows (' +
+    (docInvM ? docInvM[0] : 'no invoice no found in doc') + ') — edit aborted');
+
+  // --- 4. build old -> new pairs anchored on the doc's ACTUAL text ----------
+  var perM = before.match(/\d{2}\/\d{2}\/\d{4} to \d{2}\/\d{2}\/\d{4}/);
+  var wordM = before.match(/[A-Z][A-Z ,\-]*RUPEES ONLY[^\n]*/);
+  function words(n) { return rupeeWords_(n) + ' RUPEES ONLY/_'; }
+  var pairs = [
+    { name: 'Invoice No',   old: docRow.invoiceNo,          nw: inv },
+    { name: 'Amount',       old: money_(docRow.amount),     nw: money_(amount) },
+    { name: 'GST cells',    old: money_(docRow.cgst),       nw: money_(cgst) },
+    { name: 'Total',        old: money_(docRow.total),      nw: money_(total) },
+    { name: 'Words',        old: wordM ? wordM[0] : words(docRow.total), nw: words(total) }
+  ];
+  if (newDate && docRow.invoiceDate)
+    pairs.push({ name: 'Invoice Date', old: fmtShort_(docRow.invoiceDate), nw: fmtShort_(newDate) });
+  if (ps && pe) pairs.push({ name: 'Bill Period',
+    old: perM ? perM[0] : '', nw: fmtDMY_(ps) + ' to ' + fmtDMY_(pe) });
+  if (desc) {
+    var oldBlock = docDescBlock_(before);
+    pairs.push({ name: 'Description', old: oldBlock || String(docRow.desc || ''), nw: desc, warn: true });
+  }
+  // buyer / address / gstin / user id — anchored on the doc's actual text
+  function locate_(needle) {
+    needle = String(needle || '');
+    if (!needle) return '';
+    if (before.indexOf(needle) >= 0) return needle;
+    var j = before.toLowerCase().indexOf(needle.toLowerCase());
+    return j >= 0 ? before.substr(j, needle.length) : '';
+  }
+  var buyerOld = locate_(docRow.customer);
+  if (buyerOld && name && buyerOld !== name) pairs.push({ name: 'Buyer', old: buyerOld, nw: name, warn: true });
+  var gstinOld = locate_(docRow.gstin);
+  if (gstinOld && gstin && gstinOld !== gstin) pairs.push({ name: 'GSTIN', old: gstinOld, nw: gstin, warn: true });
+  if (address || userid) {
+    var upVals = up.getDataRange().getValues();
+    var iName = colOf_(upVals[0], 'Customer name');
+    var iAddr = colOf_(upVals[0], COL_ADDRESS), iUser = colOf_(upVals[0], COL_USERID);
+    var upRow = -1, best = 0;
+    for (var r3 = 1; r3 < upVals.length; r3++) {
+      var sc = nameScore_(cust, String(upVals[r3][iName] || ''));
+      if (sc > best) { best = sc; upRow = r3; }
+    }
+    if (upRow >= 0) {
+      var addrOld = iAddr >= 0 ? locate_(String(upVals[upRow][iAddr] || '').trim()) : '';
+      if (addrOld && address && addrOld !== address) pairs.push({ name: 'Address', old: addrOld, nw: address, warn: true });
+      var userOld = iUser >= 0 ? locate_(String(upVals[upRow][iUser] || '').trim()) : '';
+      if (userOld && userid && userOld !== userid) pairs.push({ name: 'User ID', old: userOld, nw: userid, warn: true });
+    }
+  }
+
+  // --- 5. rewrite the doc to the EDITED bill -------------------------------
+  var edit = editCustomerDoc_(docId, pairs);
+
+  // --- 6. export a FRESH render + replace that bill's archived PDF ---------
+  var blob = exportFreshViaCopy_(docId);
+  var dateStr = String(body.invoice_date || '').replace(/-/g, '/');
+  var fname = sanitizeFile_(inv) + '_' + sanitizeFile_(dateStr).replace(/\//g, '-') + '.pdf';
+  blob.setName(fname);
+  var folder = customerFolder_(cust, true);
+  var prefix = sanitizeFile_(inv), oldFile = null, it = folder.getFiles();
+  while (it.hasNext()) {
+    var f0 = it.next();
+    if (String(f0.getName()).indexOf(prefix) === 0) { oldFile = f0; break; }
+  }
+  folder.createFile(blob);
+  if (oldFile) oldFile.setTrashed(true);
+
+  // --- 7. restore the doc to the LATER bill it was showing -----------------
+  if (!isLatest) {
+    var back = pairs.map(function (p) {
+      return { name: p.name, old: p.nw, nw: p.old, warn: p.warn };
+    });
+    editCustomerDoc_(docId, back);
+  }
+
+  // --- 8. sheet: same GST RECORDS row --------------------------------------
+  var gstNow = gst.getDataRange().getValues();      // re-read: rows may have shifted
+  var rowNow = findGstRow_(gstNow, cust, inv);
+  if (rowNow < 0) throw new Error('GST RECORDS row vanished while editing — re-check the sheet');
+  var gName = colOf_(gstNow[0], 'Customer Name'), gGstin = colOf_(gstNow[0], 'Customer GSTIN');
+  var gDesc = colOf_(gstNow[0], 'Service Description'), gAmt = colOf_(gstNow[0], 'Amount ₹');
+  var gCg = colOf_(gstNow[0], 'CGST 9% (₹)'), gSg = colOf_(gstNow[0], 'SGST 9% (₹)');
+  var gTot = colOf_(gstNow[0], 'Total Amount (₹)'), gDt = colOf_(gstNow[0], 'Invoice Date');
+  if (name && gName >= 0) gst.getRange(rowNow + 1, gName + 1).setValue(name);
+  if (gGstin >= 0) gst.getRange(rowNow + 1, gGstin + 1).setValue(gstin);
+  if (desc && gDesc >= 0) gst.getRange(rowNow + 1, gDesc + 1).setValue(desc);
+  if (gAmt >= 0) gst.getRange(rowNow + 1, gAmt + 1).setValue(amount);
+  if (gCg >= 0) gst.getRange(rowNow + 1, gCg + 1).setValue(cgst);
+  if (gSg >= 0) gst.getRange(rowNow + 1, gSg + 1).setValue(sgst);
+  if (gTot >= 0) gst.getRange(rowNow + 1, gTot + 1).setValue(total);
+  if (newDate && gDt >= 0) {
+    var dCell = gst.getRange(rowNow + 1, gDt + 1);
+    dCell.setNumberFormat('dd/mm/yy');
+    dCell.setValue(newDate);
+  }
+
+  // --- 9. latest bill only: UPCOMING BILLS expiry / duration follow --------
+  var upUpdated = false;
+  if (isLatest && ps && pe) {
+    var months = monthsBetween_(ps, pe);
+    var upVals2 = up.getDataRange().getValues();
+    var iN2 = colOf_(upVals2[0], 'Customer name'), iE2 = colOf_(upVals2[0], 'Expire Date');
+    var iD2 = colOf_(upVals2[0], COL_DURATION);
+    for (var r4 = 1; r4 < upVals2.length; r4++) {
+      if (nameScore_(cust, String(upVals2[r4][iN2] || '')) >= 0.8) {
+        if (iE2 >= 0) {
+          var eCell = up.getRange(r4 + 1, iE2 + 1);
+          eCell.setNumberFormat('dd/mm/yy');
+          eCell.setValue(pe);
+        }
+        if (iD2 >= 0 && months > 0) up.getRange(r4 + 1, iD2 + 1).setValue(durationText_(months));
+        upUpdated = true;
+        break;
+      }
+    }
+  }
+
+  return {
+    ok: true, customer: cust, invoice_no: inv, is_latest: isLatest,
+    doc_restored: !isLatest, upcoming_updated: upUpdated,
+    edited: edit.edited, skipped: edit.skipped, desc: edit.desc,
+    amount: amount, cgst: cgst, sgst: sgst, total: total,
+    pdf_name: fname, pdf_base64: Utilities.base64Encode(blob.getBytes())
+  };
 }
 
 /** The new bill pipeline: edit doc in place -> export -> archive. */

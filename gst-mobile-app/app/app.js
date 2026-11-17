@@ -435,6 +435,13 @@ function renderCustomerDetail(app, params) {
       if (inv) go(renderPaymentEdit, { c: c, inv: inv });
     };
   });
+  // bill editor — one per invoice row
+  $all('.ebtn[data-inv]').forEach(function (b) {
+    b.onclick = function () {
+      var inv = c.invoices.filter(function (x) { return x.invoice_no === b.dataset.inv; })[0];
+      if (inv) go(renderBillEdit, { c: c, inv: inv });
+    };
+  });
 }
 function detailBody(c) {
   var last = c.last_invoice;
@@ -466,7 +473,8 @@ function detailBody(c) {
         (inv.payment_date ? ' · paid ' + esc(inv.payment_date) : '') + '</div></div>' +
         '<div class="right"><div class="amount">' + money(inv.total) + '</div>' +
         '<button class="pdfbtn" data-inv="' + esc(inv.invoice_no) + '">PDF 📄</button>' +
-        '<button class="pdfbtn paybtn" data-inv="' + esc(inv.invoice_no) + '">💳 ' + esc(inv.status || '?') + '</button></div></div>';
+        '<button class="pdfbtn paybtn" data-inv="' + esc(inv.invoice_no) + '">💳 ' + esc(inv.status || '?') + '</button>' +
+        '<button class="pdfbtn ebtn" data-inv="' + esc(inv.invoice_no) + '">✏️ Edit</button></div></div>';
     }).join('') + '</div>';
   }
   return '<div class="wrap">' + info + hist + '</div>';
@@ -527,6 +535,95 @@ function renderPaymentEdit(app, params) {
       toast('Update failed: ' + e.message, true);
     });
   };
+}
+
+/* --------------------------------------------------------- bill editor --- */
+function renderBillEdit(app, params) {
+  var c = params.c, inv = params.inv;
+  var toISO = function (d) {
+    var dt = new Date(d);
+    return isNaN(dt) ? '' : dt.getFullYear() + '-' + pad2(dt.getMonth() + 1) + '-' + pad2(dt.getDate());
+  };
+  app.innerHTML =
+    '<div class="overlay"><div class="ohdr">' +
+    '<button class="back" id="bk">←</button><h2>✏️ Edit · ' + esc(inv.invoice_no) + '</h2></div>' +
+    '<div class="wrap">' +
+    '<div id="ebbody"><div class="empty"><div class="big">📄</div>Loading bill…</div></div>' +
+    '<div style="height:20px"></div></div></div>';
+  $('#bk').onclick = back;
+
+  api('bill_edit_prefill', { customer: c.name, invoice_no: inv.invoice_no })
+    .then(function (pf) {
+      if (!pf || pf.ok === false) throw new Error('no prefill');
+      var latestNote = pf.is_latest
+        ? '<div class="card"><div class="meta-line">📌 This is the <b>latest</b> bill — the doc shows it now; editing updates the doc, PDF and expiry.</div></div>'
+        : '<div class="card"><div class="meta-line">📌 This is an <b>older</b> bill — the doc will temporarily switch to it for the PDF, then restore the latest bill automatically. Expiry on the sheet stays with the latest bill. Bill period is required (check the current PDF for it).</div></div>';
+      $('#ebbody').innerHTML =
+        latestNote +
+        '<div class="card">' +
+        '<div class="field"><label>Invoice no (fixed)</label><input id="e_inv" value="' + esc(inv.invoice_no) + '" disabled></div>' +
+        '<div class="field"><label>Buyer name (printed on doc)</label><input id="e_name" value="' + esc(pf.name || c.name) + '"></div>' +
+        '<div class="field"><label>Address</label><input id="e_addr" value="' + esc(pf.address || '') + '"></div>' +
+        '<div class="grid2">' +
+        '<div class="field"><label>GSTIN / UIN (optional)</label><input id="e_gstin" value="' + esc(pf.gstin || '') + '"></div>' +
+        '<div class="field"><label>User id</label><input id="e_userid" value="' + esc(pf.userid || '') + '"></div>' +
+        '</div>' +
+        '<div class="field"><label>Invoice date</label><input id="e_date" type="date" value="' + esc(pf.invoice_date || '') + '"></div>' +
+        '<div class="grid2">' +
+        '<div class="field"><label>Bill period start</label><input id="e_pstart" type="date" value="' + esc(pf.period_start || '') + '"></div>' +
+        '<div class="field"><label>Bill period end</label><input id="e_pend" type="date" value="' + esc(pf.period_end || '') + '"></div>' +
+        '</div>' +
+        '<div class="field"><label>Service description (exact PDF text)</label>' +
+        '<textarea id="e_desc">' + esc(pf.desc || '') + '</textarea></div>' +
+        '<div class="field"><label>Amount ₹ (CGST/SGST/total recompute)</label>' +
+        '<input id="e_amount" type="number" inputmode="decimal" step="0.01" min="0" value="' + esc(pf.amount || '') + '"></div>' +
+        '</div>' +
+        '<button class="btn primary" id="e_save">💾 Save edits &amp; regenerate PDF</button>';
+
+      $('#e_save').onclick = function () {
+        var body = {
+          customer: c.name,
+          invoice_no: inv.invoice_no,
+          name: $('#e_name').value.trim(),
+          address: $('#e_addr').value.trim(),
+          gstin: $('#e_gstin').value.trim(),
+          userid: $('#e_userid').value.trim(),
+          invoice_date: $('#e_date').value,
+          period_start: $('#e_pstart').value,
+          period_end: $('#e_pend').value,
+          desc: $('#e_desc').value,
+          amount: parseFloat($('#e_amount').value)
+        };
+        if (!(body.amount > 0)) { toast('Enter a valid amount', true); return; }
+        if (!body.invoice_date) { toast('Pick the invoice date', true); return; }
+        if (!body.period_start || !body.period_end) {
+          toast('Bill period (start + end) is required — check the current PDF', true); return;
+        }
+        var cg = Math.round(body.amount * 9) / 100;
+        var tot = Math.round((body.amount + cg + cg) * 100) / 100;
+        if (!confirm('Edit bill ' + inv.invoice_no + ' of ' + c.name + '?\n\n' +
+            'Invoice date: ' + body.invoice_date + '\n' +
+            'Period: ' + body.period_start + ' → ' + body.period_end + '\n' +
+            'Amount: ' + money(body.amount) + ' → total ' + money(tot) + '\n\n' +
+            'The Google Doc and the archived PDF for THIS bill are updated.' +
+            (pf.is_latest ? ' Expiry moves to the new period end.' :
+              ' The doc keeps the latest bill afterwards.'))) return;
+        busy(true, 'Editing bill… regenerating PDF…');
+        api('edit_bill', body).then(function (res) {
+          busy(false);
+          toast('Bill updated ✓ ' + res.invoice_no);
+          back(); back();               // editor + detail screen both refresh
+          refreshData(false);
+        }).catch(function (e) {
+          busy(false);
+          toast('Edit failed: ' + e.message, true);
+        });
+      };
+    })
+    .catch(function (e) {
+      $('#ebbody').innerHTML = '<div class="empty"><div class="big">⚠️</div>' +
+        esc(e.message) + '</div>';
+    });
 }
 
 /* ------------------------------------------------------ onboarding (new) */
@@ -726,6 +823,12 @@ function renderBillForm(app, params) {
   };
   function periodEndPlus1(iso) { var p = iso.split('-'); var d = new Date(+p[0], +p[1] - 1, +p[2]); d.setDate(d.getDate() + 1); return d.getFullYear() + '-' + pad2(d.getMonth() + 1) + '-' + pad2(d.getDate()); }
   ['#f_months', '#f_amount', '#f_invdate'].forEach(function (s) { $(s).oninput = recalc; $(s).onchange = recalc; });
+  // Service description = EXACT text the doc (and therefore the PDF) shows
+  api('bill_prefill', { customer: c.name }).then(function (res) {
+    var el = $('#f_desc');
+    if (res && res.desc && el && !el.dataset.touched) el.value = res.desc;
+  }).catch(function () { /* keep the sheet desc */ });
+  $('#f_desc').oninput = function () { this.dataset.touched = '1'; };
   recalc();
 
   $('#doBill').onclick = function () {
