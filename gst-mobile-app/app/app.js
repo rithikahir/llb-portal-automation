@@ -229,10 +229,6 @@ var TABS = { today: 'Home', customers: 'Customers', expiries: 'Expiries', settin
 
 function renderTab(app, params) {
   var tab = params.tab;
-  var badge = state.data ? state.data.customers.filter(function (c) {
-    var d = daysLeft(c.expire_iso);
-    return d !== null && d <= 0;
-  }).length : 0;
   app.innerHTML =
     '<div class="hdr"><div class="hdr-row">' +
     '<h1>' + (tab === 'today' ? 'GST Bills' : TABS[tab]) + '</h1>' +
@@ -244,7 +240,7 @@ function renderTab(app, params) {
     (state.online ? '' : '<div class="banner">⚠ Offline — showing last saved data</div>') +
     '<div id="tabbody"></div>' +
     '<nav class="nav">' +
-    navBtn('today', '🏠', 'Home', tab, badge ? '<span class="nav-badge">' + badge + '</span>' : '') +
+    navBtn('today', '🏠', 'Home', tab, '') +
     navBtn('customers', '👥', 'Customers', tab) +
     navBtn('expiries', '⏳', 'Expiries', tab) +
     navBtn('settings', '⚙️', 'Settings', tab) +
