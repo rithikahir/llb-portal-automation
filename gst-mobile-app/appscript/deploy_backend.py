@@ -121,8 +121,7 @@ def cmd_login():
 
     port = 5577
     server = HTTPServer(('localhost', port), Handler)
-    threading.Thread(target=server.serve_forever, daemon=True).start()
-
+    server.timeout = 3                     # handle_request returns every 3s
     auth = ('https://accounts.google.com/o/oauth2/v2/auth?' + urllib.parse.urlencode({
         'client_id': CLIENT_ID, 'redirect_uri': 'http://localhost:%d' % port,
         'response_type': 'code', 'scope': ' '.join(SCOPES),
@@ -130,11 +129,11 @@ def cmd_login():
     print('Opening the browser — approve with the account that owns the script...')
     print('(if it does not open, paste this URL there):\n' + auth)
     import webbrowser
+    import time
     webbrowser.open(auth)
-    for _ in range(300):                    # up to ~5 min
-        if result.get('code') or result.get('error'):
-            break
-        server.handle_request()
+    t0 = time.time()
+    while not result.get('code') and not result.get('error') and time.time() - t0 < 300:
+        server.handle_request()            # respects server.timeout
     server.shutdown()
     if result.get('error') or not result.get('code'):
         sys.exit('login aborted: %s' % result.get('error'))
