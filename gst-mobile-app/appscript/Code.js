@@ -102,6 +102,7 @@ function doPost(e) {
     if (body.action === 'add_customer') return jsonOut_(addCustomer_(body));
     if (body.action === 'repair_doc') return jsonOut_(repairDoc_(body));
     if (body.action === 'update_payment') return jsonOut_(updatePayment_(body));
+    if (body.action === 'refresh_pdf') return jsonOut_(refreshPdf_(body));
     return jsonOut_({ ok: false, error: 'unknown action: ' + body.action });
   } catch (err) {
     return jsonOut_({ ok: false, error: String(err && err.message || err) });
@@ -115,7 +116,7 @@ function doGet() {
                               'ping', 'list_all', 'bill_customer', 'make_pdf',
                               'sync_docs', 'check_docs', 'rebuild_doc',
                               'list_pdfs', 'get_pdf', 'map_doc', 'add_customer',
-                    'repair_doc', 'update_payment',
+                    'repair_doc', 'update_payment', 'refresh_pdf',
                               'debug_rebuild'] });
 }
 
@@ -1128,32 +1129,102 @@ function exportPdf_(docId) {
 }
 
 /** Exports the doc to PDF and archives it under BILLS/<Customer>/.
- *  Google's export endpoint can serve a cached, PRE-EDIT render right after
- *  a doc is edited (seen 17/11/26: archived ST/049 PDF had old values while
- *  the doc itself was updated). Defence: give the render a moment to settle,
- *  do a throwaway "cache-warming" export, wait again, and archive the SECOND
- *  export — which reflects the post-edit doc with near certainty. */
-function exportAndArchive_(docId, custName, invoiceNo, dateStr) {
-  Utilities.sleep(2500);
-  try { exportPdf_(docId); } catch (e) { /* warming pass is best-effort */ }
-  Utilities.sleep(2000);
-  var blob = exportPdf_(docId);
+ *  Google's export endpoint serves a CACHED, PRE-EDIT render for a while
+ *  after a doc is edited (17/11/26, twice: even ~7s of settling wasn't
+ *  enough — the archived PDF kept the old values). So instead of guessing
+ *  delays: fingerprint the PRE-EDIT render (baselineHash taken before the
+ *  edit), then keep exporting until a render DIFFERS from it — a differing
+ *  render is the post-edit PDF with near certainty. If the cache outlasts
+ *  the retries, the file is archived anyway and a background trigger
+ *  re-exports a few minutes later and overwrites it (setBlob). */
+function exportAndArchive_(docId, custName, invoiceNo, dateStr, baselineHash) {
   var fname = sanitizeFile_(invoiceNo) + '_' + sanitizeFile_(dateStr) + '.pdf';
-  blob.setName(fname);
   var folder = customerFolder_(custName, true);
+  var blob = null, settled = !baselineHash;   // no baseline -> can't verify, hope for the best
+  for (var attempt = 0; attempt < 4; attempt++) {
+    if (attempt) Utilities.sleep(attempt * 5000);   // 0s, 5s, 10s, 15s between tries
+    blob = exportPdf_(docId);
+    if (blobHash_(blob) !== baselineHash) { settled = true; break; }
+  }
+  blob.setName(fname);
   var file = folder.createFile(blob);
-  // belt & braces: one more render a couple of seconds later; if it comes
-  // back healthy, it's the newest view of the doc — push it into the file
-  Utilities.sleep(2000);
-  try {
-    var newest = exportPdf_(docId);
-    if (newest && newest.getBytes().length > 1000) {
-      newest.setName(fname);
-      file.setBlob(newest);
-      blob = newest;
+  if (!settled) {
+    enqueuePdfRefresh_({ fileId: file.getId(), docId: docId,
+                         fname: fname, baseline: baselineHash, attempts: 0 });
+  }
+  return { blob: blob, file: fname, folderUrl: folder.getUrl(), pdf_settled: settled };
+}
+
+/** md5 of a blob's bytes — fingerprint used to tell renders apart. */
+function blobHash_(blob) {
+  return Utilities.base64Encode(Utilities.computeDigest(
+    Utilities.DigestAlgorithm.MD5, blob.getBytes()));
+}
+
+/** Queue a background re-export for an archived PDF that was a stale render. */
+function enqueuePdfRefresh_(item) {
+  var q = [];
+  try { q = JSON.parse(PROPS.getProperty('PDF_REFRESH_Q') || '[]'); } catch (e) {}
+  q.push(item);
+  PROPS.setProperty('PDF_REFRESH_Q', JSON.stringify(q));
+  ScriptApp.newTrigger('processPdfRefreshQueue_').timeBased()
+    .after(3 * 60 * 1000).create();                    // first try ~3 min out
+}
+
+/** Time-triggered: re-export docs whose archived PDF was a stale render and
+ *  overwrite the archived file with the real (post-edit) render. Retries
+ *  every ~3 min, gives up after 6 attempts (~20 min). */
+function processPdfRefreshQueue_() {
+  var q = [];
+  try { q = JSON.parse(PROPS.getProperty('PDF_REFRESH_Q') || '[]'); } catch (e) {}
+  if (!q.length) return;
+  var remaining = [];
+  for (var i = 0; i < q.length; i++) {
+    var it = q[i], done = false;
+    try {
+      var blob = exportPdf_(it.docId);
+      if (blobHash_(blob) !== it.baseline) {
+        blob.setName(it.fname);
+        DriveApp.getFileById(it.fileId).setBlob(blob);
+        done = true;
+      }
+    } catch (e) { /* transient — keep in queue */ }
+    if (!done) {
+      it.attempts = (it.attempts || 0) + 1;
+      if (it.attempts <= 6) remaining.push(it);
     }
-  } catch (e) { /* keep the second-export blob */ }
-  return { blob: blob, file: fname, folderUrl: folder.getUrl() };
+  }
+  PROPS.setProperty('PDF_REFRESH_Q', JSON.stringify(remaining));
+  if (remaining.length)
+    ScriptApp.newTrigger('processPdfRefreshQueue_').timeBased()
+      .after(3 * 60 * 1000).create();
+}
+
+/** refresh_pdf: force a fresh export of a customer's doc and overwrite the
+ *  archived PDF for one invoice. Manual heal for files archived before the
+ *  self-heal existed. body: { customer, invoice_no } */
+function refreshPdf_(body) {
+  var cust = String(body.customer || '').trim();
+  var inv = String(body.invoice_no || '').trim();
+  if (!cust || !inv) throw new Error('customer and invoice_no are required');
+  var docId = customerDocId_(cust);
+  if (!docId) throw new Error('no Google Doc mapped for ' + cust);
+  var folder = customerFolder_(cust, false);
+  if (!folder) throw new Error('no archived PDFs folder for ' + cust);
+  var prefix = sanitizeFile_(inv), found = null;
+  var it = folder.getFiles();
+  while (it.hasNext()) {
+    var f = it.next();
+    if (String(f.getName()).indexOf(prefix) === 0) { found = f; break; }
+  }
+  if (!found) throw new Error('no archived PDF for ' + inv + ' in BILLS/' + cust);
+  var before = found.getBlob().getBytes().length;
+  var blob = exportPdf_(docId);
+  blob.setName(found.getName());
+  found.setBlob(blob);
+  return { ok: true, customer: cust, invoice_no: inv, pdf_name: found.getName(),
+           old_bytes: before, new_bytes: blob.getBytes().length,
+           changed: before !== blob.getBytes().length };
 }
 
 /** The new bill pipeline: edit doc in place -> export -> archive. */
@@ -1173,10 +1244,16 @@ function billViaCustomerDoc_(custName, last, oldExp, lastMonths, bill) {
     if (p.name === 'Bill Period' && perM && p.old !== p.nw) p.old = perM[0];
     if (p.name === 'Words' && wordM && p.old !== p.nw) p.old = wordM[0];
   });
+  // Fingerprint the PRE-EDIT render first (also warms the export cache) —
+  // exportAndArchive_ uses it to tell the stale cached render from the real
+  // post-edit one.
+  var baselineHash = null;
+  try { baselineHash = blobHash_(exportPdf_(docId)); } catch (e) { /* optional */ }
   var edit = editCustomerDoc_(docId, pairs);
   var arch = exportAndArchive_(docId, custName, bill.invoiceNo,
-                               String(bill.invoiceDate || '').replace(/\//g, '-'));
+                               String(bill.invoiceDate || '').replace(/\//g, '-'), baselineHash);
   return { blob: arch.blob, source: 'customer-doc', file: arch.file, folderUrl: arch.folderUrl,
+           pdf_settled: arch.pdf_settled,
            edited: edit.edited, skipped: edit.skipped, desc: edit.desc };
 }
 
@@ -1315,12 +1392,16 @@ function addCustomer_(body) {
       }
     }
     pairs.push({ name: 'Description', old: donor.last.desc, nw: desc, warn: true });
+    // fingerprint the fresh copy BEFORE the edit (same stale-render defence
+    // as the regular bill pipeline)
+    var baselineHash = null;
+    try { baselineHash = blobHash_(exportPdf_(copyId)); } catch (e) { /* optional */ }
     var edit = editCustomerDoc_(copyId, pairs);
     if (docText_(copyId).toLowerCase().indexOf(name.toLowerCase()) < 0) {
       throw new Error('the buyer line could not be replaced — doc layout unexpected');
     }
     var arch = exportAndArchive_(copyId, name, invoiceNo,
-                                 String(seed.invoiceDate).replace(/\//g, '-'));
+                                 String(seed.invoiceDate).replace(/\//g, '-'), baselineHash);
   } catch (err) {
     try { DriveApp.getFileById(copyId).setTrashed(true); } catch (e2) { /* keep going */ }
     throw new Error('doc creation failed — nothing was saved. ' +
