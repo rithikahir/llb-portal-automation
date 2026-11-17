@@ -423,8 +423,6 @@ function renderToday(body) {
   }
   if (today.length) {
     html += '<div class="section-title" style="color:var(--danger)">🔴 Expires today (' + today.length + ')</div>' +
-      '<div class="card" style="background:var(--danger-soft);border-color:#fecaca">' +
-      '<div class="meta-line" style="color:var(--danger)"><b>Bill these customers now</b> — their plan ends today.</div></div>' +
       today.map(function (c) { return customerCard(c); }).join('');
   }
   if (week.length) {
