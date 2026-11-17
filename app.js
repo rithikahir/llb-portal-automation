@@ -838,12 +838,12 @@ function openPdfViewer(invoiceNo, presetB64, presetName) {
     function show(b64) {
       var blob = b64ToBlob(b64);
       var name = p.presetName || (p.invoiceNo.replace(/[\\/]/g, '-') + '.pdf');
-      var url = URL.createObjectURL(blob);
       $('#pdfarea').innerHTML =
-        '<iframe class="pdf-frame" id="pf" src="' + url + '"></iframe>' +
+        '<div class="wrap"><div class="pdf-pages" id="pages"></div></div>' +
         '<div class="pdf-actions">' +
         '<button class="btn" id="pshare">📤 Share</button>' +
         '<button class="btn primary" id="pdown">⬇️ Save to phone</button></div>';
+      renderPdfPages_(blob, $('#pages'));
       $('#pdown').onclick = function () { downloadBlob(blob, name); toast('Saved to Downloads ✓'); };
       $('#pshare').onclick = function () { shareBlob(blob, name); };
     }
@@ -863,6 +863,43 @@ function openPdfViewer(invoiceNo, presetB64, presetName) {
         esc(e.message) + '<br><br><button class="btn" onclick="history.back()">Go back</button></div></div>';
     });
   }, { invoiceNo: invoiceNo, presetB64: presetB64 || null, presetName: presetName || null });
+}
+
+/** Render PDF pages onto canvases (mobile Chrome can't show PDFs in iframes).
+ *  Falls back to the old iframe if pdf.js didn't load (e.g. no CDN access). */
+function renderPdfPages_(blob, container) {
+  if (!window.pdfjsLib) {
+    container.innerHTML = '<iframe class="pdf-frame" src="' + URL.createObjectURL(blob) + '"></iframe>';
+    return;
+  }
+  pdfjsLib.GlobalWorkerOptions.workerSrc =
+    'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
+  var ab = blob.arrayBuffer ? blob.arrayBuffer() : new Promise(function (res, rej) {
+    var fr = new FileReader();
+    fr.onload = function () { res(fr.result); }; fr.onerror = rej;
+    fr.readAsArrayBuffer(blob);
+  });
+  ab.then(function (buf) { return pdfjsLib.getDocument({ data: buf }).promise; })
+    .then(function (pdf) {
+      var n = Math.min(pdf.numPages, 6);           // bills are 1 page; cap anyway
+      var next = function (i) {
+        if (i > n) return Promise.resolve();
+        return pdf.getPage(i).then(function (page) {
+          var fit = (container.clientWidth || 320) / page.getViewport({ scale: 1 }).width;
+          var vp = page.getViewport({ scale: Math.max(Math.min(fit, 2), 0.3) });
+          var cv = document.createElement('canvas');
+          cv.className = 'pdf-canvas';
+          cv.width = vp.width; cv.height = vp.height;
+          container.appendChild(cv);
+          return page.render({ canvasContext: cv.getContext('2d'), viewport: vp })
+            .promise.then(function () { return next(i + 1); });
+        });
+      };
+      return next(1);
+    })
+    .catch(function () {
+      container.innerHTML = '<iframe class="pdf-frame" src="' + URL.createObjectURL(blob) + '"></iframe>';
+    });
 }
 
 /* -------------------------------------------------------------- SETTINGS */
