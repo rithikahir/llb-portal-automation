@@ -1198,16 +1198,25 @@ function processPdfRefreshQueue_() {
   if (!q.length) return;
   var remaining = [];
   for (var i = 0; i < q.length; i++) {
-    var it = q[i], done = false;
+    var it = q[i], done = false, gone = false;
     try {
       var blob = exportPdf_(it.docId);
       if (blobHash_(blob) !== it.baseline) {
         blob.setName(it.fname);
-        DriveApp.getFileById(it.fileId).setBlob(blob);
+        // File.setBlob unavailable on these files — replace via create+trash
+        var f = DriveApp.getFileById(it.fileId);
+        var parent = null, pit = f.getParents();
+        if (pit.hasNext()) parent = pit.next();
+        if (parent) parent.createFile(blob); else DriveApp.getRootFolder().createFile(blob);
+        f.setTrashed(true);
         done = true;
       }
-    } catch (e) { /* transient — keep in queue */ }
-    if (!done) {
+    } catch (err) {
+      // archived file already gone (user deleted it) -> nothing to heal
+      if (String(err && err.message || err).toLowerCase().indexOf('not exist') >= 0 ||
+          String(err && err.message || err).toLowerCase().indexOf('does not exist') >= 0) gone = true;
+    }
+    if (!done && !gone) {
       it.attempts = (it.attempts || 0) + 1;
       if (it.attempts <= 6) remaining.push(it);
     }
@@ -1240,10 +1249,15 @@ function refreshPdf_(body) {
   // copy-trick export: immune to the stale render cache
   var blob = exportFreshViaCopy_(docId);
   blob.setName(found.getName());
-  found.setBlob(blob);
+  // NOTE: File.setBlob proved unavailable on these files ('not a function'),
+  // so overwrite = create the fresh file in the same folder, then trash old
+  var parent = null, pit = found.getParents();
+  if (pit.hasNext()) parent = pit.next();
+  var nf = parent ? parent.createFile(blob) : DriveApp.getRootFolder().createFile(blob);
+  found.setTrashed(true);
   return { ok: true, customer: cust, invoice_no: inv, pdf_name: found.getName(),
-           old_bytes: before, new_bytes: blob.getBytes().length,
-           changed: before !== blob.getBytes().length };
+           old_bytes: before, new_bytes: nf.getBytes().length,
+           changed: before !== nf.getBytes().length };
 }
 
 /** The new bill pipeline: edit doc in place -> export -> archive. */
