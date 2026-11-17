@@ -585,13 +585,50 @@ function listAll_(body) {
   // Each gst row belongs to its BEST-matching customer ONLY. Plain fuzzy
   // matching would hand "Dilip K Jain & Associates 1" and "…2" each other's
   // bills — the names differ by one character, similarity ~0.95.
+  // A row only attaches on an EXACT name match (>= 0.95): recurring rows are
+  // copied from the UPCOMING sheet so they match exactly; anything else
+  // (one-time bills like "Ornellas High School Switch", "Spes Manning
+  // Solutions llp Router") becomes its own entry instead of bleeding into a
+  // similarly-named customer.
+  var attached = {};
   for (var k = 0; k < gstRows.length; k++) {
     var best = -1, bestScore = 0;
     for (var c2 = 0; c2 < custs.length; c2++) {
       var s = nameScore_(custs[c2].name, gstRows[k].customer);
       if (s > bestScore) { bestScore = s; best = c2; }
     }
-    if (best >= 0) custs[best].invoices.push(gstRows[k]);  // gstRows pre-sorted newest first
+    if (best >= 0 && bestScore >= 0.95) { custs[best].invoices.push(gstRows[k]); attached[k] = true; }
+  }
+  // GST rows that matched no UPCOMING customer -> their own customers
+  // (one-time bills: doc + invoice exist, but there is no renewal row)
+  var virt = {}, vOrder = [];
+  for (var k2 = 0; k2 < gstRows.length; k2++) {
+    if (attached[k2]) continue;
+    var nm2 = gstRows[k2].customer || 'Unknown';
+    if (!virt[nm2]) { virt[nm2] = []; vOrder.push(nm2); }
+    virt[nm2].push(gstRows[k2]);
+  }
+  for (var v1 = 0; v1 < vOrder.length; v1++) {
+    var inv2 = virt[vOrder[v1]], last2 = inv2[0];
+    customers.push({
+      row: -1, name: vOrder[v1], expire: '', expire_iso: '',
+      duration: '', bill_file: '', address: '', userid: '',
+      gstin: last2 ? last2.gstin : '',
+      last_invoice: last2 ? stripRow_(last2) : null,
+      invoices: inv2.map(stripRow_)
+    });
+  }
+  // doc-mapped names with NEITHER a UPCOMING row NOR a GST row — so every
+  // customer with a Google Doc on Drive shows up in the app
+  var dmap; try { dmap = JSON.parse(PROPS.getProperty('DOCS_MAP') || '{}'); } catch (e5) { dmap = {}; }
+  for (var dn in dmap) {
+    var known = customers.some(function (c9) { return nameScore_(c9.name, dn) >= 0.95; });
+    if (known) continue;
+    customers.push({
+      row: -1, name: dn, expire: '', expire_iso: '', duration: '', bill_file: '',
+      address: '', userid: '', gstin: '', last_invoice: null, invoices: [],
+      doc_only: true
+    });
   }
   for (var c3 = 0; c3 < custs.length; c3++) {
     var r2 = custs[c3].row - 1;

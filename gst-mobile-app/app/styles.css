@@ -201,6 +201,14 @@ body {
 }
 .search .si { position: absolute; left: 13px; top: 50%; transform: translateY(-50%); color: var(--muted); }
 
+/* ---------- customer list sort ---------- */
+.sort-row { display: flex; align-items: center; gap: 8px; margin-bottom: 12px; }
+.sort-row .meta-line { margin: 0; }
+.sort-sel {
+  flex: 1; padding: 9px 12px; font-size: 14px; font-weight: 600; color: var(--ink);
+  border: 1.5px solid var(--border); border-radius: 10px; background: #fff;
+}
+
 /* ---------- empty state ---------- */
 .empty { text-align: center; color: var(--muted); padding: 40px 20px; }
 .empty .big { font-size: 40px; margin-bottom: 8px; }
