@@ -805,6 +805,7 @@ function renderBillSuccess(app, params) {
     (r.pdf_source ? '<div class="line" style="display:flex;justify-content:space-between;padding:4px 0"><span class="meta-line">PDF from</span><b>' +
       (String(r.pdf_source).indexOf('customer-doc') === 0 ? 'your Google Doc ✓' :
        String(r.pdf_source).indexOf('word-template') === 0 ? 'Word template ✓' : esc(r.pdf_source)) + '</b></div>' : '') +
+    (r.pdf_settled === false ? '<div class="small" style="color:#b26a00;margin-top:8px">⚠ Google\'s PDF render cache was stale — the archived PDF will be replaced with the correct one within a few minutes automatically. Re-open it after ~3 min.</div>' : '') +
     (r.pdf_file ? '<div class="line" style="display:flex;justify-content:space-between;padding:4px 0"><span class="meta-line">Archived on Drive</span><b style="word-break:break-all;text-align:right">' + esc(r.pdf_file) + '</b></div>' : '') +
     '</div>' +
     (r.sheet_updated === false
