@@ -18,7 +18,9 @@ var state = {
   data: null,         // list_all response {today, today_iso, customers:[]}
   savedAt: null,
   online: true,
-  deferredInstall: null
+  deferredInstall: null,
+  _scope: '',         // customers-tab filter: renewal | pending | expired
+  _billType: ''       // customers-tab bill-type filter (see BILL_TYPES)
 };
 
 /* ------------------------------------------------------------------ utils */
@@ -284,11 +286,71 @@ function renderSetup(app, retestOnly) {
 /* --------------------------------------------------------------- tabs */
 var TABS = { today: 'Home', customers: 'Customers', expiries: 'Expiries', settings: 'Settings' };
 
+/* ---------------------------------------------------------- bill types ---
+ * The dashboard is driven by a registry of bill types. The backend sends an
+ * optional `bill_type` with every customer (UPCOMING BILLS "Bill Type"
+ * column, default "GST"). To add a future type (e.g. a non-GST Shreeganesh
+ * Enterprises bill):
+ *   1. put the type's name in the sheet's Bill Type column (or teach
+ *      list_all_ in Code.js to read the new source and set bill_type),
+ *   2. add an entry below for a nicer label / icon / colour.
+ * Unknown types still render with an auto-generated label, so the dashboard
+ * never breaks when a new type appears before this list is updated.
+ * Types with no customers are hidden automatically.
+ * ------------------------------------------------------------------------ */
+var BILL_TYPES = [
+  { id: 'gst', label: 'GST Bills', icon: '🧾', accent: '#4338ca' }
+  // e.g. { id: 'shreeganesh_enterprises', label: 'Shreeganesh Enterprises', icon: '🏢', accent: '#0f766e' }
+];
+function billTypeKey_(c) {
+  var raw = String((c && c.bill_type) || 'GST').trim();
+  return raw.toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, '') || 'gst';
+}
+function billTypeMeta_(id) {
+  for (var i = 0; i < BILL_TYPES.length; i++) if (BILL_TYPES[i].id === id) return BILL_TYPES[i];
+  var label = String(id || 'other').replace(/_/g, ' ')
+    .replace(/\b\w/g, function (m) { return m.toUpperCase(); });
+  return { id: id || 'other', label: label, icon: '📄', accent: '#6b7280' };
+}
+function billTypesPresent_(cs) {
+  var seen = {}, order = [];
+  cs.forEach(function (c) {
+    var id = billTypeKey_(c);
+    if (!seen[id]) { seen[id] = true; order.push(id); }
+  });
+  var reg = BILL_TYPES.map(function (t) { return t.id; });
+  order.sort(function (a, b) {
+    var ia = reg.indexOf(a), ib = reg.indexOf(b);
+    if (ia < 0) ia = 999;
+    if (ib < 0) ib = 999;
+    return ia - ib || a.localeCompare(b);
+  });
+  return order.map(billTypeMeta_);
+}
+function typeChip_(c) {
+  var t = billTypeMeta_(billTypeKey_(c));
+  return '<span class="chip blue">' + t.icon + ' ' + esc(t.label) + '</span>';
+}
+
+/* navigation helpers used by the dashboard tiles / bill-type cards */
+function goTab_(tab) {
+  stack = [{ fn: renderTab, params: { tab: tab } }];
+  renderTop();
+}
+function goCustomers_(opts) {
+  opts = opts || {};
+  state._billType = opts.billType || '';
+  state._scope = opts.scope || '';
+  state._q = '';                     // dashboard-driven navigation starts fresh
+  state._custSort = opts.sort || 'default';
+  goTab_('customers');
+}
+
 function renderTab(app, params) {
   var tab = params.tab;
   app.innerHTML =
     '<div class="hdr"><div class="hdr-row">' +
-    '<h1>' + (tab === 'today' ? 'GST Bills' : TABS[tab]) + '</h1>' +
+    '<h1>' + (tab === 'today' ? 'Dashboard' : TABS[tab]) + '</h1>' +
     '<span style="display:flex;gap:8px;align-items:center">' +
     '<button class="iconbtn" id="addcust" title="Add customer" style="width:34px;height:34px;font-size:20px;line-height:1">＋</button>' +
     '<button class="iconbtn' + (state._refreshing ? ' spin' : '') + '" id="refresh" title="Refresh">' + svgRefresh() + '</button>' +
@@ -306,13 +368,21 @@ function renderTab(app, params) {
   $('#addcust').onclick = function () { go(renderAddCustomer, {}); };
   $all('.nav button').forEach(function (b) {
     b.onclick = function () {
-      if (b.dataset.tab === tab) return;
+      if (b.dataset.tab === tab) {
+        // tapping the active Customers tab clears any dashboard-driven filter
+        if (tab === 'customers' && (state._scope || state._billType)) {
+          state._scope = ''; state._billType = '';
+          renderTop();
+        }
+        return;
+      }
+      if (b.dataset.tab === 'customers') { state._scope = ''; state._billType = ''; }
       stack = [{ fn: renderTab, params: { tab: b.dataset.tab } }];
       renderTop();
     };
   });
   var body = $('#tabbody');
-  if (tab === 'today') renderToday(body);
+  if (tab === 'today') renderDashboard(body);
   else if (tab === 'customers') renderCustomersTab(body);
   else if (tab === 'expiries') renderExpiriesTab(body);
   else renderSettings(body);
@@ -324,10 +394,12 @@ function navBtn(tab, icon, label, active, extra) {
 function hdrSub(tab) {
   if (!state.data) return 'Not loaded yet';
   var cs = state.data.customers;
-  var today = cs.filter(function (c) { return daysLeft(c.expire_iso) === 0; }).length;
-  var overdue = cs.filter(function (c) { var d = daysLeft(c.expire_iso); return d !== null && d < 0; }).length;
+  var s = dashboardStats_(cs);
   var when = state.savedAt ? new Date(state.savedAt).toLocaleString() : '';
-  if (tab === 'today') return today + ' expiring today · ' + overdue + ' overdue · ' + cs.length + ' customers' + (when ? ' · ' + when : '');
+  if (tab === 'today') {
+    return s.total + ' customers · ' + s.renewals + ' renewals · ' + s.overdue + ' overdue' +
+      (when ? ' · ' + when : '');
+  }
   return cs.length + ' customers' + (when ? ' · updated ' + when : '');
 }
 function svgRefresh() {
@@ -367,6 +439,7 @@ function customerCard(c, opts) {
     '<div class="meta-line">' +
     (last ? 'Last: ' + esc(last.invoice_no) + ' · ' + esc(last.invoice_date) + (last.status ? ' · ' : '') : 'No invoice yet') +
     (last && last.status ? statusChip(last.status) : '') +
+    (opts.type ? ' ' + typeChip_(c) : '') +
     '</div></div>' +
     '<div class="right">' + chipFor(c.expire_iso) +
     (last ? '<div class="amount" style="margin-top:5px">' + money(last.total) + '</div>' : '') +
@@ -404,39 +477,177 @@ function byDue_(a, b) {
          a.name.localeCompare(b.name);
 }
 
-function renderToday(body) {
+/* ------------------------------------------------------------- DASHBOARD */
+function isCancelled_(c) {
+  return String(c.last_invoice && c.last_invoice.status || '').toLowerCase() === 'cancelled';
+}
+function isRenewal_(c) { return !!c.expire_iso; }
+function isActiveRenewal_(c) { return isRenewal_(c) && !isCancelled_(c); }
+function isOneTime_(c) { return !c.expire_iso; }
+function isPendingCust_(c) {
+  return (c.invoices || []).some(function (inv) {
+    return String(inv.status || '').toLowerCase() === 'pending';
+  });
+}
+function dateStamp_(s) {
+  s = String(s || '').trim();
+  if (!s) return 0;
+  // The sheet formats dates as dd/mm/yy (fmtShort_), which Date.parse would
+  // read as mm/dd/yy. Parse that shape first, but only when the month is valid
+  // so genuine mm/dd/yyyy values still fall through to Date.parse.
+  var m = s.match(/^(\d{1,2})\/(\d{1,2})\/(\d{2,4})$/);
+  if (m) {
+    var mo = Number(m[2]);
+    if (mo >= 1 && mo <= 12) {
+      var y = Number(m[3]); if (y < 100) y += 2000;
+      return new Date(y, mo - 1, Number(m[1])).getTime();
+    }
+  }
+  var t = Date.parse(s);
+  return isNaN(t) ? 0 : t;
+}
+/** All dashboard numbers in one pass. Cancelled customers and one-time /
+ *  doc-only customers (no expiry row) are kept OUT of renewal + expiry
+ *  metrics, but still counted in `total`. */
+function dashboardStats_(cs) {
+  var now = new Date();
+  var monthStart = new Date(now.getFullYear(), now.getMonth(), 1).getTime();
+  var nextMonth = new Date(now.getFullYear(), now.getMonth() + 1, 1).getTime();
+  var s = {
+    total: cs.length, renewals: 0, cancelled: 0, oneTime: 0,
+    today: 0, week: 0, overdue: 0,
+    pendingCustomers: 0, pendingAmount: 0, collectedMonth: 0,
+    expired: []
+  };
+  cs.forEach(function (c) {
+    var d = daysLeft(c.expire_iso);
+    if (!c.expire_iso) s.oneTime++;
+    else if (isCancelled_(c)) s.cancelled++;
+    else {
+      s.renewals++;
+      if (d < 0) { s.overdue++; s.expired.push(c); }
+      else if (d === 0) s.today++;
+      else if (d <= 7) s.week++;
+    }
+    if (isPendingCust_(c)) s.pendingCustomers++;
+    (c.invoices || []).forEach(function (inv) {
+      var st = String(inv.status || '').toLowerCase();
+      var total = parseFloat(inv.total) || 0;
+      if (st === 'pending') s.pendingAmount += total;
+      else if (st === 'paid') {
+        var t = dateStamp_(inv.payment_date);
+        if (t >= monthStart && t < nextMonth) s.collectedMonth += total;
+      }
+    });
+  });
+  // most recently expired first (the list shows at most 3)
+  s.expired.sort(function (a, b) { return daysLeft(b.expire_iso) - daysLeft(a.expire_iso); });
+  return s;
+}
+function statTile_(label, value, sub, goTo, tone) {
+  return '<button class="stat' + (tone ? ' ' + tone : '') + '" data-go="' + esc(goTo) + '">' +
+    '<div class="lbl">' + esc(label) + '</div>' +
+    '<div class="num">' + value + '</div>' +
+    '<div class="sub">' + esc(sub) + '</div></button>';
+}
+function renderDashboard(body) {
   if (!state.data) {
     body.innerHTML = '<div class="empty"><div class="big">📭</div>No data yet.<br><br>' +
       '<button class="btn primary" onclick="refreshData(true)">Load now</button></div>';
     return;
   }
   var cs = state.data.customers;
-  var today = cs.filter(function (c) { return daysLeft(c.expire_iso) === 0; });
-  var overdue = cs.filter(function (c) { var d = daysLeft(c.expire_iso); return d !== null && d < 0; });
-  var week = cs.filter(function (c) { var d = daysLeft(c.expire_iso); return d !== null && d > 0 && d <= 7; });
-  overdue.sort(byDue_); today.sort(byDue_); week.sort(byDue_);
-  var html = '';
+  var s = dashboardStats_(cs);
+  var types = billTypesPresent_(cs);
+  var multiType = types.length > 1;
 
-  if (overdue.length) {
-    html += '<div class="section-title" style="color:var(--danger)">⚠ Overdue (' + overdue.length + ')</div>' +
-      overdue.map(function (c) { return customerCard(c); }).join('');
+  var html = '<div class="wrap">' +
+    '<div class="stat-grid">' +
+    statTile_('Customers', s.total, 'all available', 'all', '') +
+    statTile_('Active renewals', s.renewals, 'not one-time / cancelled', 'renewal', '') +
+    statTile_('Expiring today', s.today, 'needs billing today', 'expiries', s.today ? 'danger' : '') +
+    statTile_('Next 7 days', s.week, 'coming up', 'expiries', s.week ? 'warn' : '') +
+    statTile_('Overdue', s.overdue, 'past expiry', 'expiries', s.overdue ? 'danger' : '') +
+    statTile_('Pending payments', s.pendingCustomers, money(s.pendingAmount) + ' outstanding', 'pending', s.pendingCustomers ? 'warn' : '') +
+    '</div>' +
+    '<div class="stat wide ok static"><div class="lbl">Collected this month</div>' +
+    '<div class="num">' + money(s.collectedMonth) + '</div>' +
+    '<div class="sub">paid invoices dated this month</div></div>';
+
+  if (types.length) {
+    html += '<div class="section-title">Bill types</div>';
+    types.forEach(function (t) {
+      var list = cs.filter(function (c) { return billTypeKey_(c) === t.id; });
+      var ts = dashboardStats_(list);
+      html += '<button class="card type-card" data-type="' + esc(t.id) + '">' +
+        '<div class="row-flex">' +
+        '<div class="type-ico" style="background:' + t.accent + '22;color:' + t.accent + '">' + t.icon + '</div>' +
+        '<div class="grow"><p class="cust-name">' + esc(t.label) + '</p>' +
+        '<div class="meta-line">' + ts.total + ' customers · ' + ts.renewals + ' renewals' +
+        (ts.overdue ? ' · ' + ts.overdue + ' expired' : '') + '</div></div>' +
+        '<div class="right"><b>' + ts.total + '</b><div class="small">view →</div></div>' +
+        '</div></button>';
+    });
   }
-  if (today.length) {
-    html += '<div class="section-title" style="color:var(--danger)">🔴 Expires today (' + today.length + ')</div>' +
-      today.map(function (c) { return customerCard(c); }).join('');
+
+  html += '<div class="section-title section-row"><span>Recently expired</span>' +
+    '<button class="linkbtn" id="allExpired">View all →</button></div>';
+  if (!s.expired.length) {
+    html += '<div class="card"><div class="meta-line">✅ Nothing expired right now.</div></div>';
+  } else {
+    html += '<div class="card">' + s.expired.slice(0, 3).map(function (c) {
+      return '<div class="exp-row" data-name="' + esc(c.name) + '">' +
+        '<div class="grow"><p class="cust-name">' + esc(c.name) + '</p>' +
+        '<div class="meta-line">' + esc(c.expire || '') +
+        (multiType ? ' · ' + esc(billTypeMeta_(billTypeKey_(c)).label) : '') + '</div></div>' +
+        '<div class="right">' + chipFor(c.expire_iso) + '</div></div>';
+    }).join('') + '</div>';
   }
-  if (week.length) {
-    html += '<div class="section-title">Next 7 days (' + week.length + ')</div>' +
-      week.map(function (c) { return customerCard(c); }).join('');
-  }
-  if (!html) html = '<div class="empty"><div class="big">✅</div>Nothing due today.<br>All ' + cs.length + ' customers are paid up ahead.</div>';
-  body.innerHTML = '<div class="wrap">' + html + '</div>';
-  bindCustomerCards(body);
+
+  html += '<div class="card"><div class="meta-line">' + s.oneTime +
+    ' one-time / doc-only · ' + s.cancelled +
+    ' cancelled — excluded from renewal and expiry counts.</div></div>';
+  html += '</div>';
+
+  body.innerHTML = html;
+
+  $all('.stat[data-go]', body).forEach(function (el) {
+    el.onclick = function () {
+      var to = el.dataset.go;
+      if (to === 'all') goCustomers_({});
+      else if (to === 'renewal') goCustomers_({ scope: 'renewal' });
+      else if (to === 'pending') goCustomers_({ scope: 'pending', sort: 'pending' });
+      else goTab_('expiries');
+    };
+  });
+  $all('.type-card[data-type]', body).forEach(function (el) {
+    el.onclick = function () { goCustomers_({ billType: el.dataset.type }); };
+  });
+  $all('.exp-row[data-name]', body).forEach(function (el) {
+    el.onclick = function () { go(renderCustomerDetail, { name: el.dataset.name }); };
+  });
+  $('#allExpired').onclick = function () { goTab_('expiries'); };
 }
 
 /* ------------------------------------------------------------ CUSTOMERS */
 function renderCustomersTab(body) {
+  var cs = state.data ? state.data.customers : [];
+  var types = billTypesPresent_(cs);
+  var chips = '';
+  if (types.length > 1) {
+    chips = '<div class="filter-chips">' +
+      '<button class="fchip' + (!state._billType ? ' active' : '') + '" data-type="">All types</button>' +
+      types.map(function (t) {
+        return '<button class="fchip' + (state._billType === t.id ? ' active' : '') +
+          '" data-type="' + esc(t.id) + '">' + t.icon + ' ' + esc(t.label) + '</button>';
+      }).join('') + '</div>';
+  }
+  var scope = state._scope
+    ? '<div class="scope-chip"><span>' + esc(scopeLabel_(state._scope)) + '</span>' +
+      '<button id="clearScope" title="Clear filter">✕</button></div>'
+    : '';
   body.innerHTML = '<div class="wrap">' +
+    chips + scope +
     '<div class="search"><span class="si">🔍</span>' +
     '<input id="q" placeholder="Search name, user id, GSTIN…" value="' + esc(state._q || '') + '"></div>' +
     '<div class="sort-row"><span class="meta-line">Sort</span>' +
@@ -449,22 +660,29 @@ function renderCustomersTab(body) {
   var q = $('#q'), sel = $('#csort');
   q.oninput = function () { state._q = q.value; fillCustomerList($('#clist'), q.value); };
   sel.onchange = function () { state._custSort = sel.value; fillCustomerList($('#clist'), q.value); };
+  $all('.fchip', body).forEach(function (b) {
+    b.onclick = function () {
+      state._billType = b.dataset.type || '';
+      renderCustomersTab(body);
+    };
+  });
+  if ($('#clearScope')) $('#clearScope').onclick = function () {
+    state._scope = '';
+    renderCustomersTab(body);
+  };
   fillCustomerList($('#clist'), state._q || '');
+}
+function scopeLabel_(scope) {
+  if (scope === 'renewal') return 'Active renewals only';
+  if (scope === 'pending') return 'Pending payments only';
+  if (scope === 'expired') return 'Expired only';
+  return String(scope);
 }
 function isPaidCust_(c) {
   return !!(c.last_invoice && String(c.last_invoice.status || '').toLowerCase() === 'paid');
 }
 function payStamp_(c) {
-  var s = String(c.last_invoice && c.last_invoice.payment_date || '').trim();
-  if (!s) return 0;
-  var t = Date.parse(s);
-  if (!isNaN(t)) return t;
-  var m = s.match(/(\d{1,2})\/(\d{1,2})\/(\d{2,4})/);        // dd/mm/yy text
-  if (m) {
-    var y = Number(m[3]); if (y < 100) y += 2000;
-    return new Date(y, Number(m[2]) - 1, Number(m[1])).getTime();
-  }
-  return 0;
+  return dateStamp_(c.last_invoice && c.last_invoice.payment_date);
 }
 function custRank_(c, paidFirst) {
   var st = String(c.last_invoice && c.last_invoice.status || '').toLowerCase();
@@ -482,6 +700,15 @@ function fillCustomerList(root, query) {
     if (!q) return true;
     return (c.name + ' ' + c.userid + ' ' + c.gstin).toLowerCase().indexOf(q) >= 0;
   });
+  if (state._billType) {
+    cs = cs.filter(function (c) { return billTypeKey_(c) === state._billType; });
+  }
+  if (state._scope === 'renewal') cs = cs.filter(isActiveRenewal_);
+  else if (state._scope === 'pending') cs = cs.filter(isPendingCust_);
+  else if (state._scope === 'expired') cs = cs.filter(function (c) {
+    var d = daysLeft(c.expire_iso);
+    return d !== null && d < 0 && !isCancelled_(c);
+  });
   if (state._custSort === 'pending' || state._custSort === 'paid') {
     var paidFirst = state._custSort === 'paid';
     cs = cs.slice().sort(function (a, b) {
@@ -497,8 +724,9 @@ function fillCustomerList(root, query) {
       return 0;                          // stable: keep default order otherwise
     });
   }
+  var multiType = billTypesPresent_(state.data.customers).length > 1;
   root.innerHTML = cs.length
-    ? cs.map(function (c) { return customerCard(c); }).join('')
+    ? cs.map(function (c) { return customerCard(c, { type: multiType }); }).join('')
     : '<div class="empty"><div class="big">🔎</div>No customers match.</div>';
   bindCustomerCards(root);
 }
@@ -580,7 +808,8 @@ function detailBody(c) {
     '</div>' +
     '<div class="meta-line" style="margin-top:10px">' +
     (c.userid ? 'User id: <b>' + esc(c.userid) + '</b> · ' : '') +
-    (c.gstin ? 'GSTIN: <b>' + esc(c.gstin) + '</b>' : '') +
+    (c.gstin ? 'GSTIN: <b>' + esc(c.gstin) + '</b> · ' : '') +
+    'Bill type: <b>' + esc(billTypeMeta_(billTypeKey_(c)).label) + '</b>' +
     '</div>' +
     (c.bill_file ? '<div class="small" style="margin-top:4px">Bill file: ' + esc(c.bill_file) + '</div>' : '') +
     (c.address ? '<div class="small" style="margin-top:4px;white-space:pre-line">📍 ' + esc(c.address) + '</div>' : '') +
@@ -878,6 +1107,18 @@ function renderBillForm(app, params) {
   var defDesc = last ? last.desc : '';
   var defMode = last && last.mode ? last.mode : 'Cash';
 
+  // expiry / invoice-date guard state — computed BEFORE the HTML renders so
+  // the override date input gets a real `min` attribute (not "undefined")
+  var expParts = (c.expire_iso || '').split('-');
+  var expD = expParts.length === 3 ? new Date(+expParts[0], +expParts[1] - 1, +expParts[2]) : null;
+  var minISO = '';
+  if (expD) {
+    var m1 = new Date(expD); m1.setDate(m1.getDate() + 1);
+    minISO = m1.getFullYear() + '-' + pad2(m1.getMonth() + 1) + '-' + pad2(m1.getDate());
+  }
+  var today0 = new Date(); today0.setHours(0, 0, 0, 0);
+  var billable = expD && expD.getTime() < today0.getTime();   // expiry strictly before today
+
   app.innerHTML =
     '<div class="overlay"><div class="ohdr">' +
     '<button class="back" id="bk">←</button><h2>Bill · ' + esc(c.name) + '</h2></div>' +
@@ -915,21 +1156,13 @@ function renderBillForm(app, params) {
 
     '</div>' +
 
-    '<div class="card"><div class="meta-line">📌 On confirm: next global invoice no is assigned, a row is added to <b>GST RECORDS</b> (Payment Pending), expiry moves to the new period end, the tab is re-sorted, and the bill <b>PDF is generated and saved on this phone</b> (no Drive copy).</div></div>' +
+    '<div class="card"><div class="meta-line">📌 On confirm: next global invoice no is assigned, a row is added to <b>GST RECORDS</b> (Payment Pending), expiry moves to the new period end, the tab is re-sorted, and the bill <b>PDF is archived on Drive</b> under <b>BILLS/&lt;customer&gt;</b>.</div></div>' +
 
     '<button class="btn primary" id="doBill">🧾 Update Bill &amp; Advance Expiry</button>' +
     '<div style="height:20px"></div>' +
     '</div></div>';
 
   $('#bk').onclick = back;
-  // expiry / invoice-date guard state
-  var expParts = (c.expire_iso || '').split('-');
-  var expD = expParts.length === 3 ? new Date(+expParts[0], +expParts[1] - 1, +expParts[2]) : null;
-  var minISO = '';
-  if (expD) { var m1 = new Date(expD); m1.setDate(m1.getDate() + 1);
-    minISO = m1.getFullYear() + '-' + pad2(m1.getMonth() + 1) + '-' + pad2(m1.getDate()); }
-  var today0 = new Date(); today0.setHours(0, 0, 0, 0);
-  var billable = expD && expD.getTime() < today0.getTime();   // expiry strictly before today
   $('#ov_on').onchange = $('#ov_off').onchange = function () {
     $('#ov_box').style.display = $('#ov_on').checked ? 'block' : 'none';
     recalc();
