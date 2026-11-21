@@ -1101,10 +1101,34 @@ function renderAddCustomer(app) {
 function renderBillForm(app, params) {
   var c = state.data.customers.filter(function (x) { return x.name === params.name; })[0];
   if (!c) { toast('Customer not found', true); back(); return; }
+
+  // Read the Service Description from the customer's Google Doc BEFORE the
+  // form is drawn. The field therefore opens with the doc text instead of
+  // briefly showing the sheet's previous value and then changing.
+  var fallbackDesc = c.last_invoice ? c.last_invoice.desc : '';
+  var token = 'bill' + Date.now() + Math.random();
+  app.innerHTML =
+    '<div class="overlay"><div class="ohdr">' +
+    '<button class="back" id="bk">←</button><h2>Bill · ' + esc(c.name) + '</h2></div>' +
+    '<div class="wrap"><div class="empty" id="billloading" data-token="' + token + '">' +
+    '<div class="big">📄</div>Loading bill details…</div></div></div>';
+  $('#bk').onclick = back;
+
+  api('bill_prefill', { customer: c.name }).then(function (res) {
+    return (res && res.desc) || fallbackDesc;
+  }).catch(function () {
+    return fallbackDesc;                       // offline / doc read failed
+  }).then(function (docDesc) {
+    var loading = $('#billloading');
+    if (!loading || loading.dataset.token !== token) return;   // navigated away
+    drawBillForm_(app, c, docDesc);
+  });
+}
+
+function drawBillForm_(app, c, defDesc) {
   var last = c.last_invoice;
   var defMonths = parseDurationText(c.duration) || 12;
   var defAmount = last && last.amount > 0 ? last.amount : '';
-  var defDesc = last ? last.desc : '';
   var defMode = last && last.mode ? last.mode : 'Cash';
 
   // expiry / invoice-date guard state — computed BEFORE the HTML renders so
@@ -1184,12 +1208,6 @@ function renderBillForm(app, params) {
   };
   function periodEndPlus1(iso) { var p = iso.split('-'); var d = new Date(+p[0], +p[1] - 1, +p[2]); d.setDate(d.getDate() + 1); return d.getFullYear() + '-' + pad2(d.getMonth() + 1) + '-' + pad2(d.getDate()); }
   ['#f_months', '#f_amount', '#f_invdate'].forEach(function (s) { $(s).oninput = recalc; $(s).onchange = recalc; });
-  // Service description = EXACT text the doc (and therefore the PDF) shows
-  api('bill_prefill', { customer: c.name }).then(function (res) {
-    var el = $('#f_desc');
-    if (res && res.desc && el && !el.dataset.touched) el.value = res.desc;
-  }).catch(function () { /* keep the sheet desc */ });
-  $('#f_desc').oninput = function () { this.dataset.touched = '1'; };
   recalc();
 
   $('#doBill').onclick = function () {
