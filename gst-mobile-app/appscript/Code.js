@@ -1650,12 +1650,16 @@ function editBill_(body) {
   var edit, blob;
   if (isLatest) {
     edit = editCustomerDoc_(docId, pairs);
+    // Commit DocumentApp writes before Drive makes the PDF-export copy.
+    DocumentApp.openById(docId).saveAndClose();
     blob = exportFreshViaCopy_(docId);
   } else {
     var tmp = DriveApp.getFileById(docId).makeCopy('bill-edit-tmp-' + Date.now());
     try {
       Utilities.sleep(1500);                       // let the fresh copy settle
       edit = editCustomerDoc_(tmp.getId(), pairs);
+      // Ensure the temporary document's edits are committed before export.
+      DocumentApp.openById(tmp.getId()).saveAndClose();
       blob = exportPdf_(tmp.getId());              // fresh copy — no render cache
     } finally {
       try { tmp.setTrashed(true); } catch (e2) { /* never block on cleanup */ }
@@ -1667,13 +1671,15 @@ function editBill_(body) {
   var fname = sanitizeFile_(inv) + '_' + sanitizeFile_(dateStr).replace(/\//g, '-') + '.pdf';
   blob.setName(fname);
   var folder = customerFolder_(cust, true);
-  var prefix = sanitizeFile_(inv), oldFile = null, it = folder.getFiles();
+  var prefix = sanitizeFile_(inv), oldFiles = [], it = folder.getFiles();
   while (it.hasNext()) {
     var f0 = it.next();
-    if (String(f0.getName()).indexOf(prefix) === 0) { oldFile = f0; break; }
+    if (String(f0.getName()).indexOf(prefix) === 0) oldFiles.push(f0);
   }
+  // Create the verified replacement first, then remove every active stale
+  // copy for this invoice (older runs may have left duplicate PDFs behind).
   folder.createFile(blob);
-  if (oldFile) oldFile.setTrashed(true);
+  oldFiles.forEach(function (oldFile) { oldFile.setTrashed(true); });
 
   // --- 8. sheet: same GST RECORDS row (Customer Name is NEVER changed here —
   //         renaming is doc/PDF only, per design) ----------------------------
@@ -2273,10 +2279,13 @@ function getPdf_(body) {
   var folder = customerFolder_(cust, false);
   if (!folder) throw new Error('no archived PDFs folder for ' + cust);
   var prefix = sanitizeFile_(invNo);
-  var it = folder.getFiles(), found = null;
+  var it = folder.getFiles(), found = null, newestCreated = -1;
   while (it.hasNext()) {
     var f = it.next();
-    if (String(f.getName()).indexOf(prefix) === 0) { found = f; break; }
+    if (String(f.getName()).indexOf(prefix) === 0) {
+      var created = f.getDateCreated().getTime();
+      if (created >= newestCreated) { found = f; newestCreated = created; }
+    }
   }
   if (!found) throw new Error('no archived PDF for ' + invNo +
     ' in BILLS/' + sanitizeFile_(cust) +
