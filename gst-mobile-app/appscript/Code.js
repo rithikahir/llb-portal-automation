@@ -1595,13 +1595,17 @@ function editBill_(body) {
   // --- 3. the bill the doc CURRENTLY shows (old-value anchors + restore) ----
   var docInvM = before.match(/[A-Z]{2,5}\/\d{2,4}\/\d{2,4}-\d{2,4}/) ||
                 before.match(/ST\/\d+\/[\d-]+/);
+  // Read the invoice date from the document itself. The GST RECORDS row may
+  // already contain today's date from an earlier edit while the Doc still
+  // displays its previous date.
+  var docDateM = before.match(/Invoice\\s*Date\\s*[:\\-]*\\s*(\\d{1,2}\\/\\d{1,2}\\/\\d{2,4})/i);
   var docRow = null;
   if (docInvM) {
     for (var r2 = 1; r2 < gstVals.length; r2++) {
       if (String(gstVals[r2][0] || '').trim() === docInvM[0]) {
         docRow = {
           invoiceNo: docInvM[0],
-          invoiceDate: asDate_(gstVals[r2][gCols['Invoice Date']]),
+          invoiceDateText: docDateM ? docDateM[1] : '',
           customer: String(gstVals[r2][gCols['Customer Name']] || '').trim(),
           gstin: String(gstVals[r2][gCols['Customer GSTIN']] || '').trim(),
           amount: num_(gstVals[r2][gCols['Amount ₹']]),
@@ -1615,6 +1619,7 @@ function editBill_(body) {
   }
   if (!docRow) throw new Error('could not identify the bill the doc currently shows (' +
     (docInvM ? docInvM[0] : 'no invoice no found in doc') + ') — edit aborted');
+  if (!docDateM) throw new Error('could not find the Invoice Date printed in the customer Google Doc — edit aborted without changing the bill');
 
   // Invoice numbers use ST/<serial>/<FY>. Keep the serial for corrections
   // within the same FY; allocate the next unused serial if the edited date
@@ -1643,8 +1648,8 @@ function editBill_(body) {
     { name: 'Total',        old: money_(docRow.total),      nw: money_(total) },
     { name: 'Words',        old: wordM ? wordM[0] : words(docRow.total), nw: words(total) }
   ];
-  if (newDate && docRow.invoiceDate)
-    pairs.push({ name: 'Invoice Date', old: fmtShort_(docRow.invoiceDate), nw: fmtShort_(newDate) });
+  if (newDate && docRow.invoiceDateText)
+    pairs.push({ name: 'Invoice Date', old: docRow.invoiceDateText, nw: fmtShort_(newDate) });
   if (ps && pe) pairs.push({ name: 'Bill Period',
     old: perM ? perM[0] : '', nw: fmtDMY_(ps) + ' to ' + fmtDMY_(pe) });
   if (desc) {
