@@ -1078,8 +1078,14 @@ function docText_(docId) {
 /** One text replacement. DocumentApp.replaceText treats the pattern as regex
  *  and "$" in the replacement as a capture reference — escape both sides. */
 function replaceTextInDoc_(docId, oldText, newText) {
-  DocumentApp.openById(docId).getBody()
-    .replaceText(escRegex_(oldText), String(newText).replace(/\$/g, '$$$$'));
+  var doc = DocumentApp.openById(docId);
+  try {
+    doc.getBody().replaceText(
+      escRegex_(oldText), String(newText).replace(/\$/g, '$$'));
+  } finally {
+    // Flush the exact Document instance that received the edit.
+    doc.saveAndClose();
+  }
 }
 
 /** Best-effort description replacement: whole string first, then line-wise. */
@@ -1178,6 +1184,22 @@ function editCustomerDoc_(docId, pairs) {
  *  export as fallback (reads/exports are proven safe on problem docs). */
 function exportPdf_(docId) {
   var firstErr = '';
+
+  // PRIMARY: convert the current Google Doc directly. The Docs /export URL
+  // can return a cached pre-edit render even when the document text is new.
+  try {
+    var doc = DocumentApp.openById(docId);
+    var blob = doc.getAs(MimeType.PDF);
+    doc.saveAndClose();
+    if (blob && blob.getContentType() === 'application/pdf' &&
+        blob.getBytes().length > 1000) return blob;
+    firstErr = 'DocumentApp export: ' +
+      (blob ? ('invalid/tiny PDF: ' + blob.getBytes().length + ' bytes') : 'null blob');
+  } catch (e) {
+    firstErr = 'DocumentApp export: ' + String(e && e.message || e).slice(0, 110);
+  }
+
+  // FALLBACK only: use the export URL if direct conversion fails.
   try {
     var resp = UrlFetchApp.fetch('https://docs.google.com/document/d/' + docId +
       '/export?format=pdf', {
@@ -1186,19 +1208,10 @@ function exportPdf_(docId) {
     });
     var out = resp.getBlob();
     if (resp.getResponseCode() === 200 && out.getContentType() === 'application/pdf' &&
-        out.getBytes().length > 1000) {
-      return out;
-    }
-    firstErr = 'export endpoint: HTTP ' + resp.getResponseCode() + ' ' + out.getContentType();
+        out.getBytes().length > 1000) return out;
+    firstErr += ' — export endpoint: HTTP ' + resp.getResponseCode() + ' ' + out.getContentType();
   } catch (e) {
-    firstErr = 'export endpoint: ' + String(e && e.message || e).slice(0, 110);
-  }
-  try {
-    var blob = DocumentApp.openById(docId).getAs('application/pdf');
-    if (blob && blob.getBytes().length > 1000) return blob;
-    firstErr += ' — DocumentApp: ' + (blob ? ('tiny pdf: ' + blob.getBytes().length + ' bytes') : 'null blob');
-  } catch (e) {
-    firstErr += ' — DocumentApp: ' + String(e && e.message || e).slice(0, 110);
+    firstErr += ' — export endpoint: ' + String(e && e.message || e).slice(0, 110);
   }
   throw new Error('PDF export failed — ' + firstErr);
 }
@@ -1595,12 +1608,28 @@ function editBill_(body) {
   if (!docRow) throw new Error('could not identify the bill the doc currently shows (' +
     (docInvM ? docInvM[0] : 'no invoice no found in doc') + ') — edit aborted');
 
+  // Invoice numbers use ST/<serial>/<FY>. Keep the serial for corrections
+  // within the same FY; allocate the next unused serial if the edited date
+  // moves this invoice into a different financial year.
+  var newInv = inv;
+  var invParts = inv.match(INVOICE_RE);
+  if (invParts && (invParts[2] + '-' + invParts[3]) !== fyOf_(newDate)) {
+    newInv = nextInvoiceNo_(gstVals, newDate);
+    for (var ir = 1; ir < gstVals.length; ir++) {
+      if (String(gstVals[ir][gCols['Invoice No']] || '').trim() === newInv &&
+          ir !== row) {
+        throw new Error('generated invoice number already exists: ' + newInv +
+          ' — no changes were saved');
+      }
+    }
+  }
+
   // --- 4. build old -> new pairs anchored on the doc's ACTUAL text ----------
   var perM = before.match(/\d{2}\/\d{2}\/\d{4} to \d{2}\/\d{2}\/\d{4}/);
   var wordM = before.match(/[A-Z][A-Z ,\-]*RUPEES ONLY[^\n]*/);
   function words(n) { return rupeeWords_(n) + ' RUPEES ONLY/_'; }
   var pairs = [
-    { name: 'Invoice No',   old: docRow.invoiceNo,          nw: inv },
+    { name: 'Invoice No',   old: docRow.invoiceNo,          nw: newInv },
     { name: 'Amount',       old: money_(docRow.amount),     nw: money_(amount) },
     { name: 'GST cells',    old: money_(docRow.cgst),       nw: money_(cgst) },
     { name: 'Total',        old: money_(docRow.total),      nw: money_(total) },
@@ -1650,17 +1679,16 @@ function editBill_(body) {
   var edit, blob;
   if (isLatest) {
     edit = editCustomerDoc_(docId, pairs);
-    // Commit DocumentApp writes before Drive makes the PDF-export copy.
-    DocumentApp.openById(docId).saveAndClose();
-    blob = exportFreshViaCopy_(docId);
+    // replaceTextInDoc_ flushes the exact document session after each write.
+    Utilities.sleep(1000);
+    blob = exportPdf_(docId);
   } else {
     var tmp = DriveApp.getFileById(docId).makeCopy('bill-edit-tmp-' + Date.now());
     try {
       Utilities.sleep(1500);                       // let the fresh copy settle
       edit = editCustomerDoc_(tmp.getId(), pairs);
-      // Ensure the temporary document's edits are committed before export.
-      DocumentApp.openById(tmp.getId()).saveAndClose();
-      blob = exportPdf_(tmp.getId());              // fresh copy — no render cache
+      Utilities.sleep(1000);                       // allow the saved copy to render
+      blob = exportPdf_(tmp.getId());
     } finally {
       try { tmp.setTrashed(true); } catch (e2) { /* never block on cleanup */ }
     }
@@ -1668,7 +1696,7 @@ function editBill_(body) {
 
   // --- 6. replace that bill's archived PDF ---------------------------------
   var dateStr = fmtShort_(newDate);                // dd/mm/yy
-  var fname = sanitizeFile_(inv) + '_' + sanitizeFile_(dateStr).replace(/\//g, '-') + '.pdf';
+  var fname = sanitizeFile_(newInv) + '_' + sanitizeFile_(dateStr).replace(/\//g, '-') + '.pdf';
   blob.setName(fname);
   var folder = customerFolder_(cust, true);
   var prefix = sanitizeFile_(inv), oldFiles = [], it = folder.getFiles();
@@ -1686,10 +1714,13 @@ function editBill_(body) {
   var gstNow = gst.getDataRange().getValues();      // re-read: rows may have shifted
   var rowNow = findGstRow_(gstNow, cust, inv);
   if (rowNow < 0) throw new Error('GST RECORDS row vanished while editing — re-check the sheet');
+  var gInv = colOf_(gstNow[0], 'Invoice No');
   var gGstin = colOf_(gstNow[0], 'Customer GSTIN');
   var gDesc = colOf_(gstNow[0], 'Service Description'), gAmt = colOf_(gstNow[0], 'Amount ₹');
   var gCg = colOf_(gstNow[0], 'CGST 9% (₹)'), gSg = colOf_(gstNow[0], 'SGST 9% (₹)');
   var gTot = colOf_(gstNow[0], 'Total Amount (₹)'), gDt = colOf_(gstNow[0], 'Invoice Date');
+  if (newInv !== inv && gInv >= 0)
+    gst.getRange(rowNow + 1, gInv + 1).setValue(newInv);
   if (gGstin >= 0) gst.getRange(rowNow + 1, gGstin + 1).setValue(gstin);
   if (desc && gDesc >= 0) gst.getRange(rowNow + 1, gDesc + 1).setValue(desc);
   if (gAmt >= 0) gst.getRange(rowNow + 1, gAmt + 1).setValue(amount);
@@ -1725,7 +1756,9 @@ function editBill_(body) {
   }
 
   return {
-    ok: true, customer: cust, invoice_no: inv, is_latest: isLatest,
+    ok: true, customer: cust, invoice_no: newInv,
+    previous_invoice_no: newInv !== inv ? inv : null,
+    invoice_no_changed: newInv !== inv, is_latest: isLatest,
     doc_restored: !isLatest, upcoming_updated: upUpdated,
     edited: edit.edited, skipped: edit.skipped, desc: edit.desc,
     amount: amount, cgst: cgst, sgst: sgst, total: total,
