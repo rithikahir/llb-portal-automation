@@ -1598,7 +1598,7 @@ function editBill_(body) {
   // Read the invoice date from the document itself. The GST RECORDS row may
   // already contain today's date from an earlier edit while the Doc still
   // displays its previous date.
-  var docDateM = before.match(/Invoice\\s*Date\\s*[:\\-]*\\s*(\\d{1,2}\\/\\d{1,2}\\/\\d{2,4})/i);
+  var docDateM = before.match(/Invoice\s*Date\s*[:\-]*\s*(\d{1,2}\/\d{1,2}\/\d{2,4})/i);
   var docRow = null;
   if (docInvM) {
     for (var r2 = 1; r2 < gstVals.length; r2++) {
