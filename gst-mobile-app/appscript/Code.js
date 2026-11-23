@@ -1188,9 +1188,9 @@ function exportPdf_(docId) {
   // PRIMARY: convert the current Google Doc directly. The Docs /export URL
   // can return a cached pre-edit render even when the document text is new.
   try {
-    var doc = DocumentApp.openById(docId);
-    var blob = doc.getAs(MimeType.PDF);
-    doc.saveAndClose();
+    // Google Docs Document objects do not expose Drive File conversion.
+    // Convert the saved Drive file itself to PDF.
+    var blob = DriveApp.getFileById(docId).getAs(MimeType.PDF);
     if (blob && blob.getContentType() === 'application/pdf' &&
         blob.getBytes().length > 1000) return blob;
     firstErr = 'DocumentApp export: ' +
