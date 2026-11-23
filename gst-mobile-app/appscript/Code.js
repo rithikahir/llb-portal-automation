@@ -1556,7 +1556,9 @@ function editBill_(body) {
   var address = String(body.address || '').trim();
   var userid = String(body.userid || '').trim();
   var gstin = String(body.gstin || '').trim();
-  var newDate = parseISO_(body.invoice_date);
+  // On an edit, date the invoice with the actual update day in India rather
+  // than reusing the older date prefilled from the existing GST RECORDS row.
+  var newDate = parseISO_(Utilities.formatDate(new Date(), 'Asia/Kolkata', 'yyyy-MM-dd'));
   var ps = parseISO_(body.period_start), pe = parseISO_(body.period_end);
   if (!newDate) throw new Error('invoice date is required');
   if (!(ps && pe)) throw new Error('bill period (start + end) is required — ' +
@@ -1578,6 +1580,12 @@ function editBill_(body) {
   var docId = customerDocId_(cust) || customerDocId_(billCust);
   if (!docId) throw new Error('no Google Doc mapped for ' + cust + '/' + billCust);
   var before = docText_(docId);
+  var docDescription = desc || docDescBlock_(before);
+  var sheetDescription = conciseServiceDescription_(docDescription);
+  if (!sheetDescription) {
+    sheetDescription = previousServiceDescription_(gstVals, cust, inv) ||
+      String(gstVals[row][gCols['Service Description']] || '').trim();
+  }
   var isLatest = before.indexOf(inv) >= 0;   // doc currently shows THIS bill
   if (!isLatest && !(ps && pe)) {
     throw new Error('this is not the latest bill — the Bill Period (start + end) is ' +
@@ -1722,7 +1730,8 @@ function editBill_(body) {
   if (newInv !== inv && gInv >= 0)
     gst.getRange(rowNow + 1, gInv + 1).setValue(newInv);
   if (gGstin >= 0) gst.getRange(rowNow + 1, gGstin + 1).setValue(gstin);
-  if (desc && gDesc >= 0) gst.getRange(rowNow + 1, gDesc + 1).setValue(desc);
+  if (gDesc >= 0 && sheetDescription)
+    gst.getRange(rowNow + 1, gDesc + 1).setValue(sheetDescription);
   if (gAmt >= 0) gst.getRange(rowNow + 1, gAmt + 1).setValue(amount);
   if (gCg >= 0) gst.getRange(rowNow + 1, gCg + 1).setValue(cgst);
   if (gSg >= 0) gst.getRange(rowNow + 1, gSg + 1).setValue(sgst);
@@ -2836,6 +2845,51 @@ function ensureTextColumn_(up, title) {
   up.getRange(1, idx + 1).setValue(title);
   SpreadsheetApp.flush();
   return idx;
+}
+
+/** Convert full document wording into the compact label stored in GST
+ *  RECORDS, e.g. "100 Mbps (1 Month)". Empty means it could not be parsed. */
+function conciseServiceDescription_(description) {
+  var text = String(description || '').replace(/\s+/g, ' ').trim();
+  if (!text) return '';
+  var speed = text.match(/\b(\d+(?:\.\d+)?)\s*(gbps|gb\/s|mbps|mb\/s|kbps|kb\/s)\b/i);
+  var months = parseDuration_(text);
+  if (!speed || !(months > 0)) return '';
+  var unit = /^gb/i.test(speed[2]) ? 'Gbps' :
+             /^kb/i.test(speed[2]) ? 'Kbps' : 'Mbps';
+  var duration = months === 1 ? '1 Month' : months + ' Months';
+  return speed[1] + ' ' + unit + ' (' + duration + ')';
+}
+
+/** Latest prior description for this customer, excluding the edited invoice.
+ *  Used only when the current doc wording cannot be normalized. */
+function previousServiceDescription_(gstVals, customer, excludeInvoice) {
+  if (!gstVals || !gstVals.length) return '';
+  var iInv = colOf_(gstVals[0], 'Invoice No');
+  var iName = colOf_(gstVals[0], 'Customer Name');
+  var iDesc = colOf_(gstVals[0], 'Service Description');
+  var iDate = colOf_(gstVals[0], 'Invoice Date');
+  if (iInv < 0 || iName < 0 || iDesc < 0) return '';
+  var best = '', bestScore = 0, bestDate = null, bestRow = -1;
+  for (var r = 1; r < gstVals.length; r++) {
+    if (String(gstVals[r][iInv] || '').trim() === String(excludeInvoice || '').trim()) continue;
+    var value = String(gstVals[r][iDesc] || '').trim();
+    if (!value) continue;
+    var score = nameScore_(customer, String(gstVals[r][iName] || '').trim());
+    if (score < 0.8) continue;
+    var date = iDate >= 0 ? asDate_(gstVals[r][iDate]) : null;
+    if (score > bestScore ||
+        (score === bestScore && date && (!bestDate || date > bestDate)) ||
+        (score === bestScore &&
+         ((!date && !bestDate) || (date && bestDate && date.getTime() === bestDate.getTime())) &&
+         r > bestRow)) {
+      best = value;
+      bestScore = score;
+      bestDate = date;
+      bestRow = r;
+    }
+  }
+  return best;
 }
 
 /** '1 Year' -> 12, '6 Months' -> 6, '1 Month' -> 1. 0 if unparseable. */
