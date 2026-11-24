@@ -1520,6 +1520,47 @@ function billPrefill_(body) {
 
 /** bill_edit_prefill: everything the edit-bill form needs for ONE existing
  *  bill. body: { customer, invoice_no } */
+/**
+ * Convert a printed invoice date (dd/mm/yy, dd-mm-yyyy, dd_mm_yy) to the
+ * date input's yyyy-mm-dd value. Returns '' for malformed dates.
+ */
+function invoiceDateTextToISO_(value) {
+  var m = String(value || '').trim().match(/^(\d{1,2})[\/._-](\d{1,2})[\/._-](\d{2,4})$/);
+  if (!m) return '';
+  var day = Number(m[1]), month = Number(m[2]), year = Number(m[3]);
+  if (year < 100) year += 2000;
+  var d = new Date(year, month - 1, day);
+  if (d.getFullYear() !== year || d.getMonth() !== month - 1 || d.getDate() !== day) return '';
+  return iso_(d);
+}
+
+/**
+ * Older invoices live in the archive rather than the current customer Doc.
+ * Generated archive filenames include the invoice number and its date.
+ * Accept both hyphen- and underscore-separated dates because older edit
+ * versions produced both naming conventions.
+ */
+function archivedInvoiceDateISO_(customer, invoiceNo) {
+  var folder = customerFolder_(customer, false);
+  if (!folder) return '';
+  var prefix = sanitizeFile_(invoiceNo) + '_';
+  var files = folder.getFiles(), bestISO = '', bestCreated = -1;
+  while (files.hasNext()) {
+    var file = files.next();
+    var fileName = String(file.getName() || '');
+    if (fileName.indexOf(prefix) !== 0) continue;
+    var m = fileName.match(/_(\d{1,2})[-_](\d{1,2})[-_](\d{2,4})\.pdf$/i);
+    if (!m) continue;
+    var parsed = invoiceDateTextToISO_(m[1] + '-' + m[2] + '-' + m[3]);
+    var created = file.getDateCreated().getTime();
+    if (parsed && created >= bestCreated) {
+      bestISO = parsed;
+      bestCreated = created;
+    }
+  }
+  return bestISO;
+}
+
 function billEditPrefill_(body) {
   var cust = String(body.customer || '').trim();
   var inv = String(body.invoice_no || '').trim();
@@ -1565,6 +1606,27 @@ function billEditPrefill_(body) {
   try { if (docId) docText = docText_(docId); } catch (e) { /* ignore */ }
   var isLatest = !!docText && docText.indexOf(inv) >= 0;
 
+  // Prefill from the bill's printed source rather than blindly trusting a
+  // sheet date that may have been changed by an earlier buggy edit.
+  var invoiceDate = rec.date;
+  var invoiceDateSource = 'GST RECORDS (fallback)';
+  if (isLatest && docId) {
+    try {
+      var printedDate = invoiceDateTextInDoc_(docId);
+      var printedISO = invoiceDateTextToISO_(printedDate);
+      if (printedISO) {
+        invoiceDate = printedISO;
+        invoiceDateSource = 'Google Doc';
+      }
+    } catch (dateReadErr) { /* retain the GST RECORDS fallback */ }
+  } else {
+    var archivedISO = archivedInvoiceDateISO_(rec.name || cust, inv);
+    if (archivedISO) {
+      invoiceDate = archivedISO;
+      invoiceDateSource = 'archived PDF filename (verify against PDF)';
+    }
+  }
+
   // period prefill: 1) the hidden "Bill Period" sheet column (authoritative
   // track) 2) the doc's own period line (latest bill) 3) derived guess
   var ps = null, pe = null;
@@ -1582,7 +1644,8 @@ function billEditPrefill_(body) {
   return {
     ok: true, customer: cust, invoice_no: inv, is_latest: isLatest,
     name: rec.name, gstin: rec.gstin, userid: userid, address: address,
-    invoice_date: rec.date, amount: rec.amount,
+    invoice_date: invoiceDate, invoice_date_source: invoiceDateSource,
+    amount: rec.amount,
     desc: (isLatest && docDescBlock_(docText)) ? docDescBlock_(docText) : rec.desc,
     doc_desc: docDescBlock_(docText),
     period_start: ps || '', period_end: pe || '', months: months
@@ -1657,11 +1720,13 @@ function editBill_(body) {
   var address = String(body.address || '').trim();
   var userid = String(body.userid || '').trim();
   var gstin = String(body.gstin || '').trim();
-  // On an edit, date the invoice with the actual update day in India rather
-  // than reusing the older date prefilled from the existing GST RECORDS row.
-  var newDate = indiaToday_();
+  // Existing bill edits preserve the invoice date selected in the edit form.
+  // An edit must never silently replace the original date with today's date.
+  var requestedDateText = String(body.invoice_date || '').trim();
+  var newDate = requestedDateText ? parseISO_(requestedDateText) : null;
+  if (requestedDateText && !newDate)
+    throw new Error('invoice_date must be a valid yyyy-mm-dd date');
   var ps = parseISO_(body.period_start), pe = parseISO_(body.period_end);
-  if (!newDate) throw new Error('invoice date is required');
   if (!(ps && pe)) throw new Error('bill period (start + end) is required — ' +
     'read it from the bill\'s current PDF (View in the app)');
 
@@ -1701,6 +1766,22 @@ function editBill_(body) {
   // displays its previous date.
   var docDateText = invoiceDateTextInDoc_(docId);
   var docDateM = docDateText ? [docDateText, docDateText] : null;
+
+  // Defensive fallback for older clients that omit invoice_date:
+  // latest bill -> live Google Doc; older bill -> archived PDF filename;
+  // only then fall back to GST RECORDS.
+  if (!newDate) {
+    var fallbackISO = isLatest ? invoiceDateTextToISO_(docDateText) :
+      archivedInvoiceDateISO_(billCust, inv);
+    if (!fallbackISO && gCols['Invoice Date'] >= 0) {
+      var sheetDate = asDate_(gstVals[row][gCols['Invoice Date']]);
+      if (sheetDate) fallbackISO = iso_(sheetDate);
+    }
+    newDate = fallbackISO ? parseISO_(fallbackISO) : null;
+  }
+  if (!newDate)
+    throw new Error('Could not determine this bill\'s existing invoice date. Reopen Edit Bill and select the correct invoice date; no changes were saved.');
+
   var docRow = null;
   if (docInvM) {
     for (var r2 = 1; r2 < gstVals.length; r2++) {
