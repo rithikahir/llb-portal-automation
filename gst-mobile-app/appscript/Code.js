@@ -1061,6 +1061,18 @@ function escRegex_(s) {
   return String(s).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
+/** Read printed invoice date with slash or hyphen separators. */
+function invoiceDateText_(text) {
+  var m = String(text || '').match(/Invoice\s*Date\s*[:\-]*\s*(\d{1,2}[\/-]\d{1,2}[\/-]\d{2,4})/i);
+  return m ? m[1] : '';
+}
+
+/** Preserve the separator used by the existing customer document. */
+function formatInvoiceDateLike_(date, sample) {
+  var out = fmtShort_(date);
+  return String(sample || '').indexOf('-') >= 0 ? out.replace(/\//g, '-') : out;
+}
+
 /* ---------------------------------------------------------------------------
  * Editing engine: pure Apps Script (DocumentApp). No Docs API, no REST calls
  * for editing.
@@ -1079,7 +1091,12 @@ function escRegex_(s) {
 
 /** Full text of a doc for verification — DocumentApp read. */
 function docText_(docId) {
-  return DocumentApp.openById(docId).getBody().getText();
+  var doc = DocumentApp.openById(docId);
+  var parts = [doc.getBody().getText()];
+  var header = doc.getHeader(), footer = doc.getFooter();
+  if (header) parts.push(header.getText());
+  if (footer) parts.push(footer.getText());
+  return parts.join('\n');
 }
 
 /** One text replacement. DocumentApp.replaceText treats the pattern as regex
@@ -1087,10 +1104,12 @@ function docText_(docId) {
 function replaceTextInDoc_(docId, oldText, newText) {
   var doc = DocumentApp.openById(docId);
   try {
-    doc.getBody().replaceText(
-      escRegex_(oldText), String(newText).replace(/\$/g, '$$'));
+    var targets = [doc.getBody(), doc.getHeader(), doc.getFooter()];
+    for (var i = 0; i < targets.length; i++) {
+      if (targets[i]) targets[i].replaceText(
+        escRegex_(oldText), String(newText).replace(/\$/g, '$$'));
+    }
   } finally {
-    // Flush the exact Document instance that received the edit.
     doc.saveAndClose();
   }
 }
@@ -1248,7 +1267,7 @@ function exportAndArchive_(docId, custName, invoiceNo, dateStr, baselineHash) {
     settled = false;
     for (var attempt = 0; attempt < 3 && !settled; attempt++) {
       Utilities.sleep(4000);
-      blob = exportPdf_(docId);
+      blob = exportFreshViaCopy_(docId);
       if (blobHash_(blob) !== baselineHash) { settled = true; break; }
       try {
         var viaCopy = exportFreshViaCopy_(docId);
@@ -1605,7 +1624,8 @@ function editBill_(body) {
   // Read the invoice date from the document itself. The GST RECORDS row may
   // already contain today's date from an earlier edit while the Doc still
   // displays its previous date.
-  var docDateM = before.match(/Invoice\s*Date\s*[:\-]*\s*(\d{1,2}\/\d{1,2}\/\d{2,4})/i);
+  var docDateText = invoiceDateText_(before);
+  var docDateM = docDateText ? [docDateText, docDateText] : null;
   var docRow = null;
   if (docInvM) {
     for (var r2 = 1; r2 < gstVals.length; r2++) {
@@ -1656,7 +1676,8 @@ function editBill_(body) {
     { name: 'Words',        old: wordM ? wordM[0] : words(docRow.total), nw: words(total) }
   ];
   if (newDate && docRow.invoiceDateText)
-    pairs.push({ name: 'Invoice Date', old: docRow.invoiceDateText, nw: fmtShort_(newDate) });
+    pairs.push({ name: 'Invoice Date', old: docRow.invoiceDateText,
+                 nw: formatInvoiceDateLike_(newDate, docRow.invoiceDateText) });
   if (ps && pe) pairs.push({ name: 'Bill Period',
     old: perM ? perM[0] : '', nw: fmtDMY_(ps) + ' to ' + fmtDMY_(pe) });
   if (desc) {
@@ -1708,7 +1729,7 @@ function editBill_(body) {
       Utilities.sleep(1500);                       // let the fresh copy settle
       edit = editCustomerDoc_(tmp.getId(), pairs);
       Utilities.sleep(1000);                       // allow the saved copy to render
-      blob = exportPdf_(tmp.getId());
+      blob = exportFreshViaCopy_(tmp.getId());
     } finally {
       try { tmp.setTrashed(true); } catch (e2) { /* never block on cleanup */ }
     }
@@ -1800,8 +1821,13 @@ function billViaCustomerDoc_(custName, last, oldExp, lastMonths, bill) {
   var docText = docText_(docId);
   var perM = docText.match(/\d{2}\/\d{2}\/\d{4} to \d{2}\/\d{2}\/\d{4}/);
   var wordM = docText.match(/[A-Z][A-Z ,\-]*RUPEES ONLY[^\n]*/);
+  var dateText = invoiceDateText_(docText);
   pairs.forEach(function (p) {
     if (p.name === 'Bill Period' && perM && p.old !== p.nw) p.old = perM[0];
+    if (p.name === 'Invoice Date' && dateText) {
+      p.old = dateText;
+      p.nw = formatInvoiceDateLike_(parseISO_(String(bill.invoiceDate || '').replace(/\//g, '-')), dateText);
+    }
     if (p.name === 'Words' && wordM && p.old !== p.nw) p.old = wordM[0];
   });
   // Fingerprint the PRE-EDIT render first (also warms the export cache) —
