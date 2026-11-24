@@ -385,7 +385,8 @@ function findLastGstRecord_(gstVals, name) {
     if (s <= 0) continue;
     var d = asDate_(row[1]);
     if (!best || s > bestScore || (s === bestScore && d && bestDate && d > bestDate)) {
-      best = { invoiceNo: inv, customer: String(row[2]).trim(), gstin: String(row[3] || '').trim(),
+      best = { invoiceNo: inv, invoiceDate: d ? fmtShort_(d) : String(row[1] || '').trim(),
+               customer: String(row[2]).trim(), gstin: String(row[3] || '').trim(),
                desc: String(row[4] || '').trim(), amount: row[5], cgst: row[6], sgst: row[7],
                total: row[8], mode: String(row[9] || '').trim() };
       bestScore = s; bestDate = d;
@@ -1067,6 +1068,79 @@ function invoiceDateText_(text) {
   return m ? m[1] : '';
 }
 
+/**
+ * Read the printed invoice date from the actual Google Docs structure.
+ * In this invoice layout, "Invoice Date" and its value occupy adjacent table
+ * cells. getBody().getText() flattens tables and inserts separators between
+ * cells, so matching the label and value in one text string is unreliable.
+ *
+ * Scan each table row, find the cell containing the label, then read the date
+ * from that cell or a cell to its right in the SAME row. Nested tables,
+ * document body, header and footer are supported.
+ */
+function invoiceDateTextInDoc_(docId) {
+  var doc = DocumentApp.openById(docId);
+  var roots = [doc.getBody(), doc.getHeader(), doc.getFooter()];
+
+  function dateIn_(value) {
+    var m = String(value || '').match(/\b\d{1,2}[\/.-]\d{1,2}[\/.-]\d{2,4}\b/);
+    return m ? m[0] : '';
+  }
+
+  function scan_(element) {
+    if (!element || typeof element.getType !== 'function') return '';
+    var type = element.getType();
+
+    if (type === DocumentApp.ElementType.TABLE) {
+      var table = element;
+      for (var r = 0; r < table.getNumRows(); r++) {
+        var row = table.getRow(r);
+        var cells = [];
+        for (var c = 0; c < row.getNumCells(); c++) cells.push(row.getCell(c));
+
+        for (var c0 = 0; c0 < cells.length; c0++) {
+          var cellText = cells[c0].getText();
+          if (!/Invoice\s*Date/i.test(cellText)) continue;
+
+          var sameCellDate = dateIn_(cellText);
+          if (sameCellDate) return sameCellDate;
+
+          // The value normally sits immediately to the right. Continue
+          // within this row only; never borrow a date from another row.
+          for (var c1 = c0 + 1; c1 < cells.length; c1++) {
+            var adjacentDate = dateIn_(cells[c1].getText());
+            if (adjacentDate) return adjacentDate;
+          }
+        }
+
+        // Metadata tables may be nested inside an outer invoice table.
+        for (var c2 = 0; c2 < cells.length; c2++) {
+          var nested = scan_(cells[c2]);
+          if (nested) return nested;
+        }
+      }
+      return '';
+    }
+
+    if (typeof element.getNumChildren === 'function') {
+      for (var i = 0; i < element.getNumChildren(); i++) {
+        var found = scan_(element.getChild(i));
+        if (found) return found;
+      }
+    }
+    return '';
+  }
+
+  for (var i0 = 0; i0 < roots.length; i0++) {
+    if (!roots[i0]) continue;
+    var foundDate = scan_(roots[i0]);
+    if (foundDate) return foundDate;
+  }
+
+  // Fallback for documents where label and value share one text block.
+  return invoiceDateText_(docText_(docId));
+}
+
 /** Preserve the separator used by the existing customer document. */
 function formatInvoiceDateLike_(date, sample) {
   var out = date instanceof Date ? fmtShort_(date) : String(date || '').trim();
@@ -1625,7 +1699,7 @@ function editBill_(body) {
   // Read the invoice date from the document itself. The GST RECORDS row may
   // already contain today's date from an earlier edit while the Doc still
   // displays its previous date.
-  var docDateText = invoiceDateText_(before);
+  var docDateText = invoiceDateTextInDoc_(docId);
   var docDateM = docDateText ? [docDateText, docDateText] : null;
   var docRow = null;
   if (docInvM) {
@@ -1723,13 +1797,27 @@ function editBill_(body) {
     edit = editCustomerDoc_(docId, pairs);
     // replaceTextInDoc_ flushes the exact document session after each write.
     Utilities.sleep(1000);
-    blob = exportPdf_(docId);
+    var latestPrintedDate = invoiceDateTextInDoc_(docId);
+    var latestExpectedDate = formatInvoiceDateLike_(newDate, docDateText);
+    if (latestPrintedDate !== latestExpectedDate) {
+      throw new Error('Invoice Date verification failed. Expected ' + latestExpectedDate +
+        ' in the Google Doc, but found ' + (latestPrintedDate || '(not found)') +
+        '. PDF and sheet were not updated.');
+    }
+    blob = exportFreshViaCopy_(docId);
   } else {
     var tmp = DriveApp.getFileById(docId).makeCopy('bill-edit-tmp-' + Date.now());
     try {
       Utilities.sleep(1500);                       // let the fresh copy settle
       edit = editCustomerDoc_(tmp.getId(), pairs);
       Utilities.sleep(1000);                       // allow the saved copy to render
+      var olderPrintedDate = invoiceDateTextInDoc_(tmp.getId());
+      var olderExpectedDate = formatInvoiceDateLike_(newDate, docDateText);
+      if (olderPrintedDate !== olderExpectedDate) {
+        throw new Error('Invoice Date verification failed on the temporary bill copy. Expected ' +
+          olderExpectedDate + ', found ' + (olderPrintedDate || '(not found)') +
+          '. PDF was not generated and GST RECORDS was not updated.');
+      }
       blob = exportFreshViaCopy_(tmp.getId());
     } finally {
       try { tmp.setTrashed(true); } catch (e2) { /* never block on cleanup */ }
@@ -1822,10 +1910,13 @@ function billViaCustomerDoc_(custName, last, oldExp, lastMonths, bill) {
   var docText = docText_(docId);
   var perM = docText.match(/\d{2}\/\d{2}\/\d{4} to \d{2}\/\d{2}\/\d{4}/);
   var wordM = docText.match(/[A-Z][A-Z ,\-]*RUPEES ONLY[^\n]*/);
-  var dateText = invoiceDateText_(docText);
+  var dateText = invoiceDateTextInDoc_(docId);
+  if (!dateText) {
+    throw new Error('Invoice Date label/value could not be located in the customer Google Doc table. The document was not changed and GST RECORDS was not updated.');
+  }
   pairs.forEach(function (p) {
     if (p.name === 'Bill Period' && perM && p.old !== p.nw) p.old = perM[0];
-    if (p.name === 'Invoice Date' && dateText) {
+    if (p.name === 'Invoice Date') {
       p.old = dateText;
       p.nw = formatInvoiceDateLike_(bill.invoiceDate, dateText);
     }
@@ -1837,6 +1928,14 @@ function billViaCustomerDoc_(custName, last, oldExp, lastMonths, bill) {
   var baselineHash = null;
   try { baselineHash = blobHash_(exportPdf_(docId)); } catch (e) { /* optional */ }
   var edit = editCustomerDoc_(docId, pairs);
+  Utilities.sleep(300);
+  var expectedPrintedDate = formatInvoiceDateLike_(bill.invoiceDate, dateText);
+  var actualPrintedDate = invoiceDateTextInDoc_(docId);
+  if (actualPrintedDate !== expectedPrintedDate) {
+    throw new Error('Invoice Date verification failed. Expected ' + expectedPrintedDate +
+      ' in the Google Doc, but found ' + (actualPrintedDate || '(not found)') +
+      '. PDF generation and GST RECORDS update were stopped.');
+  }
   var arch = exportAndArchive_(docId, custName, bill.invoiceNo,
                                String(bill.invoiceDate || '').replace(/\//g, '-'), baselineHash);
   return { blob: arch.blob, source: 'customer-doc', file: arch.file, folderUrl: arch.folderUrl,
@@ -1955,6 +2054,16 @@ function addCustomer_(body) {
     }
     var pairs = docEditPairs_(donor.last, donor.exp, donor.months, seed);
     pairs = pairs.filter(function (p) { return p.name !== 'Description'; });
+    var donorPrintedDate = invoiceDateTextInDoc_(copyId);
+    if (!donorPrintedDate) {
+      throw new Error('Invoice Date label/value could not be located in the donor Google Doc table.');
+    }
+    pairs.forEach(function (p) {
+      if (p.name === 'Invoice Date') {
+        p.old = donorPrintedDate;
+        p.nw = formatInvoiceDateLike_(seed.invoiceDate, donorPrintedDate);
+      }
+    });
     var buyerOld = locate_(donor.last.customer);
     if (buyerOld) pairs.push({ name: 'Buyer', old: buyerOld, nw: name });
     var addrOld = locate_(donor.addr);
@@ -1984,6 +2093,12 @@ function addCustomer_(body) {
     var baselineHash = null;
     try { baselineHash = blobHash_(exportPdf_(copyId)); } catch (e) { /* optional */ }
     var edit = editCustomerDoc_(copyId, pairs);
+    var newCustomerPrintedDate = invoiceDateTextInDoc_(copyId);
+    var expectedSeedDate = formatInvoiceDateLike_(seed.invoiceDate, donorPrintedDate);
+    if (newCustomerPrintedDate !== expectedSeedDate) {
+      throw new Error('Invoice Date verification failed on the new customer document. Expected ' +
+        expectedSeedDate + ', found ' + (newCustomerPrintedDate || '(not found)') + '.');
+    }
     if (docText_(copyId).toLowerCase().indexOf(name.toLowerCase()) < 0) {
       throw new Error('the buyer line could not be replaced — doc layout unexpected');
     }
