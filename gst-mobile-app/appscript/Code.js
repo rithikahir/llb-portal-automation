@@ -1069,7 +1069,8 @@ function invoiceDateText_(text) {
 
 /** Preserve the separator used by the existing customer document. */
 function formatInvoiceDateLike_(date, sample) {
-  var out = fmtShort_(date);
+  var out = date instanceof Date ? fmtShort_(date) : String(date || '').trim();
+  out = out.replace(/-/g, '/');
   return String(sample || '').indexOf('-') >= 0 ? out.replace(/\//g, '-') : out;
 }
 
@@ -1826,7 +1827,7 @@ function billViaCustomerDoc_(custName, last, oldExp, lastMonths, bill) {
     if (p.name === 'Bill Period' && perM && p.old !== p.nw) p.old = perM[0];
     if (p.name === 'Invoice Date' && dateText) {
       p.old = dateText;
-      p.nw = formatInvoiceDateLike_(parseISO_(String(bill.invoiceDate || '').replace(/\//g, '-')), dateText);
+      p.nw = formatInvoiceDateLike_(bill.invoiceDate, dateText);
     }
     if (p.name === 'Words' && wordM && p.old !== p.nw) p.old = wordM[0];
   });
