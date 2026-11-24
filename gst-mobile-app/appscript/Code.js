@@ -401,7 +401,8 @@ function appendGstRecord_(gst, gCols, v) {
   row[gCols['Invoice Date']] = v.invoiceDate;
   row[gCols['Customer Name']] = v.customer;
   row[gCols['Customer GSTIN']] = v.gstin;
-  row[gCols['Service Description']] = v.desc;
+  // Keep full wording on the Google Doc/PDF; store a compact label in GST RECORDS.
+  row[gCols['Service Description']] = conciseServiceDescription_(v.desc) || v.desc;
   row[gCols['Amount ₹']] = v.amount;
   row[gCols['CGST 9% (₹)']] = v.cgst;
   row[gCols['SGST 9% (₹)']] = v.sgst;
@@ -491,6 +492,12 @@ function asDate_(v) {
 }
 
 function startOfDay_(d) { return new Date(d.getFullYear(), d.getMonth(), d.getDate()); }
+
+/** Date-only value for invoice operations, based on the India business timezone. */
+function indiaToday_() {
+  var iso = Utilities.formatDate(new Date(), 'Asia/Kolkata', 'yyyy-MM-dd');
+  return parseISO_(iso);
+}
 function addDays_(d, n) { return new Date(d.getFullYear(), d.getMonth(), d.getDate() + n); }
 function fmt_(d) { return pad_(d.getDate(), 2) + '/' + pad_(d.getMonth() + 1, 2) + '/' + pad_(d.getFullYear() % 100, 2); }
 function pad_(n, w) { var s = String(n); while (s.length < w) s = '0' + s; return s; }
@@ -729,7 +736,7 @@ function billCustomer_(body) {
   if (!(months > 0)) throw new Error('duration_months not sent and Duration column of ' + custName + ' is not parseable');
 
   // --- period + invoice no -------------------------------------------------
-  var today = startOfDay_(new Date());
+  var today = indiaToday_();
   // --- invoice-date guard + early-billing override -------------------------
   // A renewal may be invoiced only AFTER the current plan expires (from the
   // next day on). To bill early, the caller must send `invoice_date`
@@ -1558,7 +1565,7 @@ function editBill_(body) {
   var gstin = String(body.gstin || '').trim();
   // On an edit, date the invoice with the actual update day in India rather
   // than reusing the older date prefilled from the existing GST RECORDS row.
-  var newDate = parseISO_(Utilities.formatDate(new Date(), 'Asia/Kolkata', 'yyyy-MM-dd'));
+  var newDate = indiaToday_();
   var ps = parseISO_(body.period_start), pe = parseISO_(body.period_end);
   if (!newDate) throw new Error('invoice date is required');
   if (!(ps && pe)) throw new Error('bill period (start + end) is required — ' +
@@ -1883,7 +1890,7 @@ function addCustomer_(body) {
   if (!donor) throw new Error('no suitable donor doc — need one mapped customer whose GST record has gstin, invoice no + date, amount, and a parseable expiry + duration');
 
   // --- the first bill (seed) -------------------------------------------------
-  var today = startOfDay_(new Date());
+  var today = indiaToday_();
   var periodStart = today;
   var psRaw = String(body.period_start || '').trim();
   if (/^\d{4}-\d{2}-\d{2}$/.test(psRaw)) {          // from <input type=date>
@@ -2855,7 +2862,10 @@ function ensureTextColumn_(up, title) {
 /** Convert full document wording into the compact label stored in GST
  *  RECORDS, e.g. "100 Mbps (1 Month)". Empty means it could not be parsed. */
 function conciseServiceDescription_(description) {
-  var text = String(description || '').replace(/\s+/g, ' ').trim();
+  var text = String(description || '')
+    .replace(/&nbsp;|&#xA0;|&#160;/gi, ' ')
+    .replace(/[\u00A0\u202F]/g, ' ')
+    .replace(/\s+/g, ' ').trim();
   if (!text) return '';
   var speed = text.match(/\b(\d+(?:\.\d+)?)\s*(gbps|gb\/s|mbps|mb\/s|kbps|kb\/s)\b/i);
   var months = parseDuration_(text);
