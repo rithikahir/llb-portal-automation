@@ -925,7 +925,8 @@ function renderBillEdit(app, params) {
         '<div class="field"><label>GSTIN / UIN (optional)</label><input id="e_gstin" value="' + esc(pf.gstin || '') + '"></div>' +
         '<div class="field"><label>User id</label><input id="e_userid" value="' + esc(pf.userid || '') + '"></div>' +
         '</div>' +
-        '<div class="field"><label>Invoice date</label><input id="e_date" type="date" value="' + esc(pf.invoice_date || '') + '"></div>' +
+        '<div class="field"><label>Invoice date (keep existing unless you want to change it)</label><input id="e_date" type="date" value="' + esc(pf.invoice_date || '') + '">' +
+        '<div class="small">Loaded from ' + esc(pf.invoice_date_source || 'the existing invoice record') + '. Leave this date unchanged to preserve the original invoice date; choose another date only when you intend to change it.</div></div>' +
         '<div class="grid2">' +
         '<div class="field"><label>Bill period start</label><input id="e_pstart" type="date" value="' + esc(pf.period_start || '') + '"></div>' +
         '<div class="field"><label>Bill period end</label><input id="e_pend" type="date" value="' + esc(pf.period_end || '') + '"></div>' +
