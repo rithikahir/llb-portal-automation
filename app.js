@@ -1439,6 +1439,8 @@ function openPdfViewer(invoiceNo, presetB64, presetName) {
 /** Render PDF pages onto canvases (mobile Chrome can't show PDFs in iframes).
  *  Falls back to the old iframe if pdf.js didn't load (e.g. no CDN access). */
 function renderPdfPages_(blob, container) {
+  container.innerHTML = '<div class="pdf-render-loading"><span class="loading-spinner" aria-hidden="true"></span>' +
+    '<div>Rendering PDF pages…</div></div>';
   if (!window.pdfjsLib) {
     container.innerHTML = '<iframe class="pdf-frame" src="' + URL.createObjectURL(blob) + '"></iframe>';
     return;
@@ -1452,6 +1454,7 @@ function renderPdfPages_(blob, container) {
   });
   ab.then(function (buf) { return pdfjsLib.getDocument({ data: buf }).promise; })
     .then(function (pdf) {
+      container.innerHTML = '';
       var n = Math.min(pdf.numPages, 6);           // bills are 1 page; cap anyway
       var next = function (i) {
         if (i > n) return Promise.resolve();
