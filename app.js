@@ -981,7 +981,9 @@ function renderBillEdit(app, params) {
         busy(true, 'Editing bill… regenerating PDF…');
         api('edit_bill', body).then(function (res) {
           busy(false);
-          toast('Bill updated ✓ ' + res.invoice_no);
+          toast('Bill updated ✓ ' + res.invoice_no +
+            (res.gst_name_updated ? ' · GST RECORDS renamed' : '') +
+            (res.upcoming_name_updated ? ' · UPCOMING BILLS renamed' : ''));
           back(); back();               // editor + detail screen both refresh
           refreshData(false);
         }).catch(function (e) {
