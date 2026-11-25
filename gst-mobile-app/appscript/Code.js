@@ -2339,10 +2339,10 @@ function editBill_(body) {
 
   var currentUpcomingHeader = up.getRange(1, 1, 1, up.getLastColumn()).getValues()[0];
   var currentExpireIndex = colOf_(currentUpcomingHeader, 'Expire Date');
-  if (upUpdated && currentExpireIndex >= 0) {
+  if (currentExpireIndex >= 0) {
+    // Re-sort the entire UPCOMING BILLS table after every bill edit. This
+    // also repairs any rows that were already out of order before this edit.
     sortUpcomingByExpire_(up, currentExpireIndex);
-  } else if (currentExpireIndex >= 0) {
-    normalizeUpcomingExpireDates_(up, currentExpireIndex);
   }
 
   return {
