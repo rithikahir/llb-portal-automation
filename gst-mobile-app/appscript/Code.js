@@ -2189,7 +2189,7 @@ function editBill_(body) {
     upcomingNameUpdated = true;
   }
 
-  if ((gstNameUpdated || upcomingNameUpdated) && name && name !== billCust) {
+  if ((gstNameUpdated || upcomingNameUpdated) && name) {
     rememberCustomerRenameAliases_([cust, billCust, oldUpcomingName], name, docId,
       updateGstName ? name : billCust);
   }
