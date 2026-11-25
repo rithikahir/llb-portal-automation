@@ -468,9 +468,26 @@ function writeBillPeriod_(gst, c0, r0, ps, pe) {
   gst.getRange(r0 + 1, c0 + 1).setValue(fmtDMY_(ps) + ' to ' + fmtDMY_(pe));
 }
 
+var customerNameAliasCache_ = null;
+
+function loadCustomerNameAliases_() {
+  if (customerNameAliasCache_) return customerNameAliasCache_;
+  try { customerNameAliasCache_ = JSON.parse(PROPS.getProperty('CUSTOMER_NAME_ALIASES') || '{}'); }
+  catch (e) { customerNameAliasCache_ = {}; }
+  return customerNameAliasCache_;
+}
+
+function canonicalCustomerName_(value) {
+  var key = normName_(value);
+  var aliases = loadCustomerNameAliases_();
+  return aliases[key] ? normName_(aliases[key]) : key;
+}
+
 function nameScore_(a, b) {
   var na = normName_(a), nb = normName_(b);
   if (!na || !nb) return 0;
+  var ca = canonicalCustomerName_(a), cb = canonicalCustomerName_(b);
+  if (ca && cb && ca === cb) return 1;
   if (na === nb) return 1;
   if (nb.indexOf(na) === 0 || na.indexOf(nb) === 0) return 0.9;
   var ta = tokens_(a), tb = tokens_(b);
@@ -963,7 +980,7 @@ function saveManualMap_(m) { PROPS.setProperty('DOCS_MAP_MANUAL', JSON.stringify
  * the same Doc and Drive archive. This prevents independent sheet renames
  * from breaking future billing or access to older PDFs.
  */
-function rememberCustomerRenameAliases_(oldNames, newName, docId) {
+function rememberCustomerRenameAliases_(oldNames, newName, docId, canonicalGstName) {
   var names = (oldNames || []).concat([newName]).map(function (v) {
     return String(v || '').trim();
   }).filter(Boolean);
@@ -986,6 +1003,25 @@ function rememberCustomerRenameAliases_(oldNames, newName, docId) {
   if (!canonical) canonical = sanitizeFile_(unique[0]);
   unique.forEach(function (v) { aliases[normName_(v)] = canonical; });
   PROPS.setProperty('CUSTOMER_FOLDER_ALIASES', JSON.stringify(aliases));
+
+  // Maintain stable identity across the two independently editable sheets.
+  // If UPCOMING BILLS is renamed without GST RECORDS, the app must still be
+  // able to locate the old GST rows for future billing and edit operations.
+  var nameAliases = {};
+  try { nameAliases = JSON.parse(PROPS.getProperty('CUSTOMER_NAME_ALIASES') || '{}'); } catch (e) {}
+  var canonical = String(canonicalGstName || newName || unique[0]).trim();
+  var previousCanonicals = {};
+  unique.forEach(function (v) {
+    var existingCanonical = nameAliases[normName_(v)];
+    if (existingCanonical) previousCanonicals[normName_(existingCanonical)] = true;
+  });
+  Object.keys(nameAliases).forEach(function (key) {
+    if (previousCanonicals[normName_(nameAliases[key])]) nameAliases[key] = canonical;
+  });
+  unique.forEach(function (v) { nameAliases[normName_(v)] = canonical; });
+  nameAliases[normName_(canonical)] = canonical;
+  PROPS.setProperty('CUSTOMER_NAME_ALIASES', JSON.stringify(nameAliases));
+  customerNameAliasCache_ = nameAliases;
 
   if (docId) {
     var map = {};
@@ -2154,7 +2190,8 @@ function editBill_(body) {
   }
 
   if ((gstNameUpdated || upcomingNameUpdated) && name && name !== billCust) {
-    rememberCustomerRenameAliases_([cust, billCust, oldUpcomingName], name, docId);
+    rememberCustomerRenameAliases_([cust, billCust, oldUpcomingName], name, docId,
+      updateGstName ? name : billCust);
   }
 
   // --- 9. latest bill only: UPCOMING BILLS expiry / duration follow --------
@@ -2165,7 +2202,8 @@ function editBill_(body) {
     var iN2 = colOf_(upVals2[0], 'Customer name'), iE2 = colOf_(upVals2[0], 'Expire Date');
     var iD2 = colOf_(upVals2[0], COL_DURATION);
     for (var r4 = 1; r4 < upVals2.length; r4++) {
-      if (nameScore_(cust, String(upVals2[r4][iN2] || '')) >= 0.8) {
+      var expiryLookupName = updateUpcomingName ? name : cust;
+      if (nameScore_(expiryLookupName, String(upVals2[r4][iN2] || '')) >= 0.8) {
         if (iE2 >= 0) {
           var eCell = up.getRange(r4 + 1, iE2 + 1);
           eCell.setNumberFormat('dd/mm/yy');
