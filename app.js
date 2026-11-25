@@ -1207,17 +1207,20 @@ function renderBillForm(app, params) {
   $('#bk').onclick = back;
 
   api('bill_prefill', { customer: c.name }).then(function (res) {
-    return (res && res.desc) || fallbackDesc;
+    return {
+      desc: (res && res.desc) || fallbackDesc,
+      userid: (res && res.userid) || c.userid || ''
+    };
   }).catch(function () {
-    return fallbackDesc;                       // offline / doc read failed
-  }).then(function (docDesc) {
+    return { desc: fallbackDesc, userid: c.userid || '' }; // offline / Doc read failed
+  }).then(function (prefill) {
     var loading = $('#billloading');
     if (!loading || loading.dataset.token !== token) return;   // navigated away
-    drawBillForm_(app, c, docDesc);
+    drawBillForm_(app, c, prefill.desc, prefill.userid);
   });
 }
 
-function drawBillForm_(app, c, defDesc) {
+function drawBillForm_(app, c, defDesc, defUserId) {
   var last = c.last_invoice;
   var defMonths = parseDurationText(c.duration) || 12;
   var defAmount = last && last.amount > 0 ? last.amount : '';
@@ -1253,7 +1256,7 @@ function drawBillForm_(app, c, defDesc) {
     '<div class="field"><label>Service description</label><textarea id="f_desc">' + esc(defDesc) + '</textarea></div>' +
     '<div class="grid2">' +
     '<div class="field"><label>Payment mode</label><input id="f_mode" value="' + esc(defMode) + '"></div>' +
-    '<div class="field"><label>User id</label><input id="f_userid" value="' + esc(c.userid || '') + '" placeholder="e.g. HINDUSTAN"></div>' +
+    '<div class="field"><label>User id</label><input id="f_userid" value="' + esc(defUserId || c.userid || '') + '" placeholder="e.g. HINDUSTAN"></div>' +
     '</div>' +
     '<div class="field"><label>Buyer address (saved to sheet for next time)</label>' +
     '<textarea id="f_address" placeholder="Street, area, Pune - PIN">' + esc(c.address || '') + '</textarea></div>' +
