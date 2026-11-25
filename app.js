@@ -921,6 +921,14 @@ function renderBillEdit(app, params) {
         '<div class="field"><label>Invoice no (fixed)</label><input id="e_inv" value="' + esc(inv.invoice_no) + '" disabled></div>' +
         '<div class="field"><label>Buyer name (printed on doc)</label><input id="e_name" value="' + esc(pf.name || c.name) + '"></div>' +
         '<div class="field"><label>Address</label><input id="e_addr" value="' + esc(pf.address || '') + '"></div>' +
+        '<div class="card">' +
+        '<div style="font-weight:700;margin-bottom:6px">Where should the updated buyer name be saved?</div>' +
+        '<label style="display:flex;align-items:flex-start;gap:8px;padding:6px 0"><input id="e_update_gst_name" type="checkbox" style="width:18px;height:18px;margin-top:2px">' +
+        '<span><b>Also update GST RECORDS</b><span class="small" style="display:block">Rename this customer in the Customer Name column for their invoice records.</span></span></label>' +
+        '<label style="display:flex;align-items:flex-start;gap:8px;padding:6px 0"><input id="e_update_upcoming_name" type="checkbox" style="width:18px;height:18px;margin-top:2px">' +
+        '<span><b>Also update UPCOMING BILLS</b><span class="small" style="display:block">Rename the customer in the upcoming-bill list.</span></span></label>' +
+        '<div class="small">Both options are off by default. When neither is selected, the name changes only in the Google Doc and the regenerated PDF.</div>' +
+        '</div>' +
         '<div class="grid2">' +
         '<div class="field"><label>GSTIN / UIN (optional)</label><input id="e_gstin" value="' + esc(pf.gstin || '') + '"></div>' +
         '<div class="field"><label>User id</label><input id="e_userid" value="' + esc(pf.userid || '') + '"></div>' +
@@ -943,6 +951,8 @@ function renderBillEdit(app, params) {
           customer: c.name,
           invoice_no: inv.invoice_no,
           name: $('#e_name').value.trim(),
+          update_gst_name: $('#e_update_gst_name').checked,
+          update_upcoming_name: $('#e_update_upcoming_name').checked,
           address: $('#e_addr').value.trim(),
           gstin: $('#e_gstin').value.trim(),
           userid: $('#e_userid').value.trim(),
@@ -962,7 +972,9 @@ function renderBillEdit(app, params) {
         if (!confirm('Edit bill ' + inv.invoice_no + ' of ' + c.name + '?\n\n' +
             'Invoice date: ' + body.invoice_date + '\n' +
             'Period: ' + body.period_start + ' → ' + body.period_end + '\n' +
-            'Amount: ' + money(body.amount) + ' → total ' + money(tot) + '\n\n' +
+            'Amount: ' + money(body.amount) + ' → total ' + money(tot) + '\n' +
+            'GST RECORDS name update: ' + (body.update_gst_name ? 'Yes' : 'No') + '\n' +
+            'UPCOMING BILLS name update: ' + (body.update_upcoming_name ? 'Yes' : 'No') + '\n\n' +
             'The Google Doc and the archived PDF for THIS bill are updated.' +
             (pf.is_latest ? ' Expiry moves to the new period end.' :
               ' The doc is not touched — only this bill\'s PDF is replaced.'))) return;
