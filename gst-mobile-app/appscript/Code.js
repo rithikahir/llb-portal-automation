@@ -310,6 +310,29 @@ function complete_(body) {
   return { ok: true, log: log };
 }
 
+/**
+ * Heal legacy/text expiry values and enforce a two-digit day/month display.
+ * Runs on list refresh and after sorting, so existing rows are corrected too.
+ */
+function normalizeUpcomingExpireDates_(up, iExp) {
+  var lastRow = up.getLastRow();
+  if (lastRow < 2 || iExp < 0) return;
+  var range = up.getRange(2, iExp + 1, lastRow - 1, 1);
+  var values = range.getValues();
+  var changed = false;
+  for (var i = 0; i < values.length; i++) {
+    var value = values[i][0];
+    if (value instanceof Date || value === '' || value === null) continue;
+    var parsed = asDate_(value);
+    if (parsed) {
+      values[i][0] = parsed;
+      changed = true;
+    }
+  }
+  if (changed) range.setValues(values);
+  range.setNumberFormat('dd/mm/yy');
+}
+
 /** Re-orders the data rows of UPCOMING BILLS by Expire Date, nearest first. */
 function sortUpcomingByExpire_(up, iExp) {
   var lastRow = up.getLastRow();
@@ -325,6 +348,7 @@ function sortUpcomingByExpire_(up, iExp) {
     return da - db;
   });
   up.getRange(2, 1, lastRow - 1, lastCol).setValues(vals);
+  normalizeUpcomingExpireDates_(up, iExp);
   SpreadsheetApp.flush();
 }
 
@@ -551,6 +575,8 @@ function listAll_(body) {
   var iName = colOf_(upVals[0], 'Customer name');
   var iExp = colOf_(upVals[0], 'Expire Date');
   if (iName < 0 || iExp < 0) throw new Error('UPCOMING BILLS needs "Customer name" and "Expire Date" columns');
+  normalizeUpcomingExpireDates_(up, iExp);
+  upVals = up.getDataRange().getValues();
   var iDur = colOf_(upVals[0], COL_DURATION);
   var iFile = colOf_(upVals[0], COL_BILL_FILE);
   var iAddr = colOf_(upVals[0], COL_ADDRESS);
@@ -893,11 +919,22 @@ function pdfsRoot_() {
   return it.hasNext() ? it.next() : docs.createFolder('BILLS');
 }
 
+function loadCustomerFolderAliases_() {
+  try { return JSON.parse(PROPS.getProperty('CUSTOMER_FOLDER_ALIASES') || '{}'); }
+  catch (e) { return {}; }
+}
+
+function customerFolderName_(custName) {
+  var aliases = loadCustomerFolderAliases_();
+  return aliases[normName_(custName)] || sanitizeFile_(custName);
+}
+
 function customerFolder_(custName, create) {
   var root = pdfsRoot_();
-  var it = root.getFoldersByName(sanitizeFile_(custName));
+  var folderName = customerFolderName_(custName);
+  var it = root.getFoldersByName(folderName);
   if (it.hasNext()) return it.next();
-  return create ? root.createFolder(sanitizeFile_(custName)) : null;
+  return create ? root.createFolder(folderName) : null;
 }
 
 /** Doc id mapped to a customer (DOCS_MAP prop, built by syncDocs_). */
@@ -920,6 +957,48 @@ function loadManualMap_() {
   try { return JSON.parse(raw); } catch (e) { return {}; }
 }
 function saveManualMap_(m) { PROPS.setProperty('DOCS_MAP_MANUAL', JSON.stringify(m)); }
+
+/**
+ * Keep both the previous account names and the new buyer name resolving to
+ * the same Doc and Drive archive. This prevents independent sheet renames
+ * from breaking future billing or access to older PDFs.
+ */
+function rememberCustomerRenameAliases_(oldNames, newName, docId) {
+  var names = (oldNames || []).concat([newName]).map(function (v) {
+    return String(v || '').trim();
+  }).filter(Boolean);
+  var unique = [];
+  names.forEach(function (v) {
+    if (unique.indexOf(v) < 0) unique.push(v);
+  });
+  if (!unique.length) return;
+
+  var root = pdfsRoot_();
+  var aliases = loadCustomerFolderAliases_();
+  var canonical = '';
+  for (var i = 0; i < unique.length && !canonical; i++) {
+    canonical = aliases[normName_(unique[i])] || '';
+  }
+  for (var j = 0; j < unique.length && !canonical; j++) {
+    var it = root.getFoldersByName(sanitizeFile_(unique[j]));
+    if (it.hasNext()) canonical = it.next().getName();
+  }
+  if (!canonical) canonical = sanitizeFile_(unique[0]);
+  unique.forEach(function (v) { aliases[normName_(v)] = canonical; });
+  PROPS.setProperty('CUSTOMER_FOLDER_ALIASES', JSON.stringify(aliases));
+
+  if (docId) {
+    var map = {};
+    try { map = JSON.parse(PROPS.getProperty('DOCS_MAP') || '{}'); } catch (e) {}
+    unique.forEach(function (v) { map[v] = docId; });
+    saveDocsMap_(map);
+
+    var manual = loadManualMap_();
+    unique.forEach(function (v) { manual[v] = docId; });
+    saveManualMap_(manual);
+  }
+}
+
 
 /* --------------------------------------------------------------- sync ----- */
 
@@ -1139,6 +1218,78 @@ function invoiceDateTextInDoc_(docId) {
 
   // Fallback for documents where label and value share one text block.
   return invoiceDateText_(docText_(docId));
+}
+
+/**
+ * Extract the actual printed buyer name from the "Buyer (Bill to)" cell.
+ * This is important after a Doc/PDF-only rename: GST RECORDS intentionally
+ * retains its customer key unless the user opts into a sheet rename.
+ */
+function buyerNameInDoc_(docId) {
+  var doc = DocumentApp.openById(docId);
+  var roots = [doc.getBody(), doc.getHeader(), doc.getFooter()];
+
+  function cleanCandidate_(value) {
+    var v = String(value || '').replace(/\u00A0/g, ' ').trim();
+    if (!v || /^(GSTIN|GSTIN \/ UIN|State Name|SAC Code|Invoice Date|Invoice No)\b/i.test(v)) return '';
+    return v;
+  }
+
+  function fromCellText_(value) {
+    var lines = String(value || '').replace(/\u00A0/g, ' ').split(/\r?\n/);
+    for (var i = 0; i < lines.length; i++) {
+      if (!/Buyer\s*\(\s*Bill\s*to\s*\)/i.test(lines[i])) continue;
+      var sameLine = cleanCandidate_(lines[i].replace(/.*Buyer\s*\(\s*Bill\s*to\s*\)\s*/i, ''));
+      if (sameLine) return sameLine;
+      for (var j = i + 1; j < lines.length; j++) {
+        var next = cleanCandidate_(lines[j]);
+        if (next) return next;
+      }
+    }
+    return '';
+  }
+
+  function scan_(element) {
+    if (!element || typeof element.getType !== 'function') return '';
+    if (element.getType() === DocumentApp.ElementType.TABLE) {
+      var table = element;
+      for (var r = 0; r < table.getNumRows(); r++) {
+        var row = table.getRow(r), cells = [];
+        for (var c = 0; c < row.getNumCells(); c++) cells.push(row.getCell(c));
+        for (var c0 = 0; c0 < cells.length; c0++) {
+          var found = fromCellText_(cells[c0].getText());
+          if (found) return found;
+          if (/Buyer\s*\(\s*Bill\s*to\s*\)/i.test(cells[c0].getText())) {
+            for (var c1 = c0 + 1; c1 < cells.length; c1++) {
+              var adjacent = cleanCandidate_(cells[c1].getText());
+              if (adjacent) return adjacent.split(/\r?\n/)[0].trim();
+            }
+          }
+        }
+        for (var c2 = 0; c2 < cells.length; c2++) {
+          var nested = scan_(cells[c2]);
+          if (nested) return nested;
+        }
+      }
+      return '';
+    }
+    if (typeof element.getNumChildren === 'function') {
+      for (var i0 = 0; i0 < element.getNumChildren(); i0++) {
+        var child = scan_(element.getChild(i0));
+        if (child) return child;
+      }
+    }
+    return '';
+  }
+
+  for (var i1 = 0; i1 < roots.length; i1++) {
+    if (!roots[i1]) continue;
+    var result = scan_(roots[i1]);
+    if (result) return result;
+  }
+  var flat = docText_(docId);
+  var m = flat.match(/Buyer\s*\(\s*Bill\s*to\s*\)\s*[\r\n]+([^\r\n]+)/i);
+  return m ? cleanCandidate_(m[1]) : '';
 }
 
 /** Preserve the separator used by the existing customer document. */
@@ -1605,6 +1756,13 @@ function billEditPrefill_(body) {
   var docText = '';
   try { if (docId) docText = docText_(docId); } catch (e) { /* ignore */ }
   var isLatest = !!docText && docText.indexOf(inv) >= 0;
+  var prefillBuyerName = rec.name;
+  if (isLatest && docId) {
+    try {
+      var actualBuyerName = buyerNameInDoc_(docId);
+      if (actualBuyerName) prefillBuyerName = actualBuyerName;
+    } catch (buyerReadErr) { /* retain GST RECORDS fallback */ }
+  }
 
   // Prefill from the bill's printed source rather than blindly trusting a
   // sheet date that may have been changed by an earlier buggy edit.
@@ -1643,7 +1801,7 @@ function billEditPrefill_(body) {
   }
   return {
     ok: true, customer: cust, invoice_no: inv, is_latest: isLatest,
-    name: rec.name, gstin: rec.gstin, userid: userid, address: address,
+    name: prefillBuyerName, gstin: rec.gstin, userid: userid, address: address,
     invoice_date: invoiceDate, invoice_date_source: invoiceDateSource,
     amount: rec.amount,
     desc: (isLatest && docDescBlock_(docText)) ? docDescBlock_(docText) : rec.desc,
@@ -1741,6 +1899,35 @@ function editBill_(body) {
   var row = findGstRow_(gstVals, cust, inv);
   if (row < 0) throw new Error('no GST RECORDS row with invoice ' + inv + ' for ' + cust);
   var billCust = String(gstVals[row][gCols['Customer Name']] || '').trim();
+  var updateGstName = body.update_gst_name === true;
+  var updateUpcomingName = body.update_upcoming_name === true;
+  if ((updateGstName || updateUpcomingName) && !name)
+    throw new Error('Buyer name is required when a sheet rename option is selected');
+
+  var upValsBefore = up.getDataRange().getValues();
+  var iUpcomingName = colOf_(upValsBefore[0], 'Customer name');
+  var upcomingNameRow = -1, upcomingNameScore = 0;
+  var oldUpcomingName = '';
+  if (updateUpcomingName) {
+    if (iUpcomingName < 0) throw new Error('UPCOMING BILLS has no Customer name column');
+    for (var ur = 1; ur < upValsBefore.length; ur++) {
+      var us = nameScore_(cust, String(upValsBefore[ur][iUpcomingName] || ''));
+      if (us > upcomingNameScore) {
+        upcomingNameScore = us;
+        upcomingNameRow = ur;
+      }
+    }
+    if (upcomingNameRow < 1 || upcomingNameScore < 0.8)
+      throw new Error('Could not uniquely locate the customer in UPCOMING BILLS; no changes were saved');
+    oldUpcomingName = String(upValsBefore[upcomingNameRow][iUpcomingName] || '').trim();
+
+    for (var ux = 1; ux < upValsBefore.length; ux++) {
+      if (ux === upcomingNameRow) continue;
+      var otherName = String(upValsBefore[ux][iUpcomingName] || '').trim();
+      if (otherName && normName_(otherName) === normName_(name))
+        throw new Error('UPCOMING BILLS already contains another customer named "' + name + '". Choose a different name; no changes were saved.');
+    }
+  }
 
   // --- 2. the customer's doc ------------------------------------------------
   var docId = customerDocId_(cust) || customerDocId_(billCust);
@@ -1761,6 +1948,7 @@ function editBill_(body) {
   // --- 3. the bill the doc CURRENTLY shows (old-value anchors + restore) ----
   var docInvM = before.match(/[A-Z]{2,5}\/\d{2,4}\/\d{2,4}-\d{2,4}/) ||
                 before.match(/ST\/\d+\/[\d-]+/);
+  var docBuyerName = isLatest ? buyerNameInDoc_(docId) : '';
   // Read the invoice date from the document itself. The GST RECORDS row may
   // already contain today's date from an earlier edit while the Doc still
   // displays its previous date.
@@ -1789,7 +1977,7 @@ function editBill_(body) {
         docRow = {
           invoiceNo: docInvM[0],
           invoiceDateText: docDateM ? docDateM[1] : '',
-          customer: String(gstVals[r2][gCols['Customer Name']] || '').trim(),
+          customer: docBuyerName || String(gstVals[r2][gCols['Customer Name']] || '').trim(),
           gstin: String(gstVals[r2][gCols['Customer GSTIN']] || '').trim(),
           amount: num_(gstVals[r2][gCols['Amount ₹']]),
           cgst: num_(gstVals[r2][gCols['CGST 9% (₹)']]),
@@ -1930,6 +2118,7 @@ function editBill_(body) {
   var gDesc = colOf_(gstNow[0], 'Service Description'), gAmt = colOf_(gstNow[0], 'Amount ₹');
   var gCg = colOf_(gstNow[0], 'CGST 9% (₹)'), gSg = colOf_(gstNow[0], 'SGST 9% (₹)');
   var gTot = colOf_(gstNow[0], 'Total Amount (₹)'), gDt = colOf_(gstNow[0], 'Invoice Date');
+  var gCustomerName = colOf_(gstNow[0], 'Customer Name');
   if (newInv !== inv && gInv >= 0)
     gst.getRange(rowNow + 1, gInv + 1).setValue(newInv);
   if (gGstin >= 0) gst.getRange(rowNow + 1, gGstin + 1).setValue(gstin);
@@ -1945,6 +2134,28 @@ function editBill_(body) {
     dCell.setValue(newDate);
   }
   if (ps && pe) writeBillPeriod_(gst, ensureBillPeriodCol_(gst), rowNow, ps, pe);
+
+  var gstNameUpdated = false;
+  if (updateGstName && gCustomerName >= 0) {
+    var changedGstRows = 0;
+    for (var gr = 1; gr < gstNow.length; gr++) {
+      if (String(gstNow[gr][gCustomerName] || '').trim() === billCust) {
+        gst.getRange(gr + 1, gCustomerName + 1).setValue(name);
+        changedGstRows++;
+      }
+    }
+    gstNameUpdated = changedGstRows > 0;
+  }
+
+  var upcomingNameUpdated = false;
+  if (updateUpcomingName && upcomingNameRow >= 1 && iUpcomingName >= 0) {
+    up.getRange(upcomingNameRow + 1, iUpcomingName + 1).setValue(name);
+    upcomingNameUpdated = true;
+  }
+
+  if ((gstNameUpdated || upcomingNameUpdated) && name && name !== billCust) {
+    rememberCustomerRenameAliases_([cust, billCust, oldUpcomingName], name, docId);
+  }
 
   // --- 9. latest bill only: UPCOMING BILLS expiry / duration follow --------
   var upUpdated = false;
@@ -1967,11 +2178,17 @@ function editBill_(body) {
     }
   }
 
+  var currentUpcomingHeader = up.getRange(1, 1, 1, up.getLastColumn()).getValues()[0];
+  var currentExpireIndex = colOf_(currentUpcomingHeader, 'Expire Date');
+  if (currentExpireIndex >= 0) normalizeUpcomingExpireDates_(up, currentExpireIndex);
+
   return {
     ok: true, customer: cust, invoice_no: newInv,
     previous_invoice_no: newInv !== inv ? inv : null,
     invoice_no_changed: newInv !== inv, is_latest: isLatest,
     doc_restored: !isLatest, upcoming_updated: upUpdated,
+    gst_name_updated: gstNameUpdated, upcoming_name_updated: upcomingNameUpdated,
+    updated_customer_name: name,
     edited: edit.edited, skipped: edit.skipped, desc: edit.desc,
     amount: amount, cgst: cgst, sgst: sgst, total: total,
     pdf_name: fname, pdf_base64: Utilities.base64Encode(blob.getBytes())
