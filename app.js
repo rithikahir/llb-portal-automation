@@ -118,10 +118,82 @@ function loadCache() {
 }
 
 /* ------------------------------------------------------------------ API */
+var pendingActionButton_ = null;
+
+// Capture the clicked button before its handler runs. This works on touch
+// browsers where document.activeElement is not always updated for buttons.
+document.addEventListener('click', function (event) {
+  var target = event.target;
+  var button = target && target.closest ? target.closest('button') : null;
+  if (!button) return;
+  pendingActionButton_ = button;
+  setTimeout(function () {
+    if (pendingActionButton_ === button) pendingActionButton_ = null;
+  }, 0);
+}, true);
+
+var API_LOADING_LABELS_ = {
+  ping: 'Connecting…',
+  list_all: 'Refreshing…',
+  update_payment: 'Saving…',
+  edit_bill: 'Saving changes…',
+  add_customer: 'Creating customer…',
+  get_pdf: 'Loading PDF…'
+};
+
+function startApiButtonLoading_(action) {
+  var button = pendingActionButton_;
+  if (!button || !button.isConnected || button.disabled || button.dataset.apiLoading === '1') {
+    button = document.activeElement;
+  }
+  if (!button || !button.isConnected || button.tagName !== 'BUTTON' ||
+      button.disabled || button.dataset.apiLoading === '1') return null;
+
+  var state = {
+    button: button,
+    html: button.innerHTML,
+    className: button.className,
+    disabled: button.disabled,
+    ariaBusy: button.getAttribute('aria-busy'),
+    ariaLabel: button.getAttribute('aria-label')
+  };
+  button.dataset.apiLoading = '1';
+  button.disabled = true;
+  button.setAttribute('aria-busy', 'true');
+
+  // Icon-only refresh controls already have a rotating SVG; retain that
+  // compact presentation but still prevent duplicate taps.
+  if (button.classList.contains('iconbtn')) {
+    button.classList.add('spin');
+  } else {
+    var label = API_LOADING_LABELS_[action] || 'Working…';
+    button.classList.add('button-loading');
+    button.innerHTML = '<span class="mini-spinner" aria-hidden="true"></span>' +
+      '<span>' + esc(label) + '</span>';
+  }
+  if (pendingActionButton_ === button) pendingActionButton_ = null;
+  return state;
+}
+
+function finishApiButtonLoading_(state) {
+  if (!state || !state.button || !state.button.isConnected) return;
+  var button = state.button;
+  button.innerHTML = state.html;
+  button.className = state.className;
+  button.disabled = state.disabled;
+  if (state.ariaBusy === null) button.removeAttribute('aria-busy');
+  else button.setAttribute('aria-busy', state.ariaBusy);
+  if (state.ariaLabel === null) button.removeAttribute('aria-label');
+  else button.setAttribute('aria-label', state.ariaLabel);
+  delete button.dataset.apiLoading;
+}
+
 function api(action, payload) {
   if (!state.cfg || !state.cfg.url) return Promise.reject(new Error('not configured'));
+  var buttonState = startApiButtonLoading_(action);
   var body = JSON.stringify(Object.assign({ action: action, secret: state.cfg.secret }, payload || {}));
-  // Content-Type text/plain => "simple request", no CORS preflight needed
+  // Content-Type text/plain => "simple request", no CORS preflight needed.
+  // The loading state is scoped to this request and restored on success/failure.
   return fetch(state.cfg.url, {
     method: 'POST',
     headers: { 'Content-Type': 'text/plain;charset=utf-8' },
@@ -131,6 +203,8 @@ function api(action, payload) {
   }).then(function (j) {
     if (!j || j.ok === false) throw new Error((j && j.error) || 'server error');
     return j;
+  }).finally(function () {
+    finishApiButtonLoading_(buttonState);
   });
 }
 
@@ -905,7 +979,7 @@ function renderBillEdit(app, params) {
     '<div class="overlay"><div class="ohdr">' +
     '<button class="back" id="bk">←</button><h2>✏️ Edit · ' + esc(inv.invoice_no) + '</h2></div>' +
     '<div class="wrap">' +
-    '<div id="ebbody"><div class="empty"><div class="big">📄</div>Loading bill…</div></div>' +
+    '<div id="ebbody"><div class="empty"><span class="loading-spinner" aria-hidden="true"></span><div>Loading bill details…</div></div></div>' +
     '<div style="height:20px"></div></div></div>';
   $('#bk').onclick = back;
 
@@ -1126,7 +1200,7 @@ function renderBillForm(app, params) {
     '<div class="overlay"><div class="ohdr">' +
     '<button class="back" id="bk">←</button><h2>Bill · ' + esc(c.name) + '</h2></div>' +
     '<div class="wrap"><div class="empty" id="billloading" data-token="' + token + '">' +
-    '<div class="big">📄</div>Loading bill details…</div></div></div>';
+    '<span class="loading-spinner" aria-hidden="true"></span><div>Loading bill details…</div></div></div></div>';
   $('#bk').onclick = back;
 
   api('bill_prefill', { customer: c.name }).then(function (res) {
@@ -1328,7 +1402,7 @@ function openPdfViewer(invoiceNo, presetB64, presetName) {
     app.innerHTML =
       '<div class="overlay"><div class="ohdr">' +
       '<button class="back" id="bk">←</button><h2>' + esc(p.invoiceNo) + '</h2></div>' +
-      '<div id="pdfarea"><div class="wrap"><div class="empty"><div class="big">📄</div>Loading PDF…</div></div></div>' +
+      '<div id="pdfarea"><div class="wrap"><div class="empty"><span class="loading-spinner" aria-hidden="true"></span><div>Loading PDF from Drive…</div></div></div></div>' +
       '</div>';
     $('#bk').onclick = back;
 
