@@ -334,6 +334,31 @@ function normalizeUpcomingExpireDates_(up, iExp) {
 }
 
 /** Re-orders the data rows of UPCOMING BILLS by Expire Date, nearest first. */
+/** Find the UPCOMING BILLS serial-number column without creating a new column. */
+function upcomingSrNoColumn_(headers) {
+  for (var i = 0; i < headers.length; i++) {
+    var key = String(headers[i] || '').toLowerCase().replace(/[^a-z0-9]/g, '');
+    if (key === 'srno' || key === 'sno' || key === 'serialno' ||
+        key === 'serialnumber' || key === 'srnumber') return i;
+  }
+  return -1;
+}
+
+/** Return one greater than the highest existing numeric Sr No. */
+function nextUpcomingSrNo_(up, srNoColumn) {
+  if (srNoColumn < 0) throw new Error('UPCOMING BILLS has no Sr No column (accepted headers: Sr No, Sr. No., S.No., Serial No)');
+  var values = up.getDataRange().getValues();
+  var maxNumber = 0;
+  for (var r = 1; r < values.length; r++) {
+    var raw = String(values[r][srNoColumn] === null || values[r][srNoColumn] === undefined
+      ? '' : values[r][srNoColumn]).trim();
+    if (!raw) continue;
+    var number = /^\d+$/.test(raw) ? parseInt(raw, 10) : 0;
+    if (number > maxNumber) maxNumber = number;
+  }
+  return maxNumber + 1;
+}
+
 function sortUpcomingByExpire_(up, iExp) {
   var lastRow = up.getLastRow();
   if (lastRow < 2) return;
@@ -874,10 +899,7 @@ function billCustomer_(body) {
     cell.setValue(periodEnd);
     if (iDur >= 0) up.getRange(row + 1, iDur + 1).setValue(durationText_(months));
 
-    if (address && iAddr < 0) iAddr = ensureTextColumn_(up, COL_ADDRESS);
     if (address && iAddr >= 0) up.getRange(row + 1, iAddr + 1).setValue(address);
-
-    if (userid && iUser < 0) iUser = ensureTextColumn_(up, COL_USERID);
     if (userid && iUser >= 0) up.getRange(row + 1, iUser + 1).setValue(userid);
 
     sortUpcomingByExpire_(up, iExp);
@@ -1697,12 +1719,15 @@ function docDescBlock_(text) {
  *  body: { customer } */
 function billPrefill_(body) {
   var cust = String(body.customer || '').trim();
-  var desc = '';
+  var desc = '', userid = '';
   var docId = customerDocId_(cust);
   if (docId) {
-    try { desc = docDescBlock_(docText_(docId)); } catch (e) { /* doc read failed */ }
+    try {
+      desc = docDescBlock_(docText_(docId));
+      userid = userIdInDoc_(docId);
+    } catch (e) { /* doc read failed; caller retains any legacy fallback */ }
   }
-  return { ok: true, customer: cust, desc: desc };
+  return { ok: true, customer: cust, desc: desc, userid: userid };
 }
 
 /** bill_edit_prefill: everything the edit-bill form needs for ONE existing
@@ -1746,6 +1771,94 @@ function archivedInvoiceDateISO_(customer, invoiceNo) {
     }
   }
   return bestISO;
+}
+
+/**
+ * Read the printed broadband User ID from the live Google Doc.
+ * Supports "User id :- VALUE" in one cell or a label/value pair in adjacent
+ * cells, and searches nested tables plus the document header/footer.
+ */
+function userIdInDoc_(docId) {
+  var doc = DocumentApp.openById(docId);
+  var roots = [doc.getBody(), doc.getHeader(), doc.getFooter()];
+
+  function validValue_(value) {
+    var v = String(value || '').replace(/\u00A0/g, ' ').trim();
+    v = v.replace(/^[:\-]+\s*/, '').trim();
+    if (!v) return '';
+    if (/^(GSTIN|GSTIN \/ UIN|State Name|SAC Code|Invoice Date|Invoice No|Buyer\s*\(|Support|PAN|E-Mail|Place of Supply|State Code|User\s*id)\b/i.test(v)) return '';
+    return v.split(/\r?\n/)[0].trim();
+  }
+
+  function valueFromLabelCell_(value) {
+    var lines = String(value || '').replace(/\u00A0/g, ' ').split(/\r?\n/);
+    for (var i = 0; i < lines.length; i++) {
+      var match = lines[i].match(/User\s*id\s*(?:[:\-]+\s*)?(.*)$/i);
+      if (!match) continue;
+      var inlineValue = validValue_(match[1]);
+      if (inlineValue) return inlineValue;
+      for (var j = i + 1; j < lines.length; j++) {
+        var nextLine = validValue_(lines[j]);
+        if (nextLine) return nextLine;
+      }
+    }
+    return '';
+  }
+
+  function scan_(element) {
+    if (!element || typeof element.getType !== 'function') return '';
+    if (element.getType() === DocumentApp.ElementType.TABLE) {
+      var table = element;
+      for (var r = 0; r < table.getNumRows(); r++) {
+        var row = table.getRow(r), cells = [];
+        for (var c = 0; c < row.getNumCells(); c++) cells.push(row.getCell(c));
+
+        for (var c0 = 0; c0 < cells.length; c0++) {
+          var labelText = cells[c0].getText();
+          if (!/User\s*id/i.test(labelText)) continue;
+
+          var sameCellValue = valueFromLabelCell_(labelText);
+          if (sameCellValue) return sameCellValue;
+
+          for (var c1 = c0 + 1; c1 < cells.length; c1++) {
+            var adjacentValue = validValue_(cells[c1].getText());
+            if (adjacentValue) return adjacentValue;
+          }
+
+          for (var r2 = r + 1; r2 < Math.min(table.getNumRows(), r + 3); r2++) {
+            var belowRow = table.getRow(r2);
+            if (belowRow.getNumCells() > c0) {
+              var belowValue = validValue_(belowRow.getCell(c0).getText());
+              if (belowValue) return belowValue;
+            }
+          }
+        }
+
+        for (var c2 = 0; c2 < cells.length; c2++) {
+          var nestedValue = scan_(cells[c2]);
+          if (nestedValue) return nestedValue;
+        }
+      }
+      return '';
+    }
+    if (typeof element.getNumChildren === 'function') {
+      for (var i = 0; i < element.getNumChildren(); i++) {
+        var found = scan_(element.getChild(i));
+        if (found) return found;
+      }
+    }
+    return '';
+  }
+
+  for (var i0 = 0; i0 < roots.length; i0++) {
+    if (!roots[i0]) continue;
+    var result = scan_(roots[i0]);
+    if (result) return result;
+  }
+
+  var flat = docText_(docId);
+  var fallback = flat.match(/User\s*id\s*(?:[:\-]+\s*)?([^\r\n]+)/i);
+  return fallback ? validValue_(fallback[1]) : '';
 }
 
 function billEditPrefill_(body) {
@@ -1793,11 +1906,16 @@ function billEditPrefill_(body) {
   try { if (docId) docText = docText_(docId); } catch (e) { /* ignore */ }
   var isLatest = !!docText && docText.indexOf(inv) >= 0;
   var prefillBuyerName = rec.name;
+  var prefillUserId = userid;
   if (isLatest && docId) {
     try {
       var actualBuyerName = buyerNameInDoc_(docId);
       if (actualBuyerName) prefillBuyerName = actualBuyerName;
     } catch (buyerReadErr) { /* retain GST RECORDS fallback */ }
+    try {
+      var actualUserId = userIdInDoc_(docId);
+      if (actualUserId) prefillUserId = actualUserId;
+    } catch (userReadErr) { /* retain legacy UPCOMING BILLS fallback */ }
   }
 
   // Prefill from the bill's printed source rather than blindly trusting a
@@ -1837,7 +1955,7 @@ function billEditPrefill_(body) {
   }
   return {
     ok: true, customer: cust, invoice_no: inv, is_latest: isLatest,
-    name: prefillBuyerName, gstin: rec.gstin, userid: userid, address: address,
+    name: prefillBuyerName, gstin: rec.gstin, userid: prefillUserId, address: address,
     invoice_date: invoiceDate, invoice_date_source: invoiceDateSource,
     amount: rec.amount,
     desc: (isLatest && docDescBlock_(docText)) ? docDescBlock_(docText) : rec.desc,
@@ -2088,8 +2206,11 @@ function editBill_(body) {
     if (upRow >= 0) {
       var addrOld = iAddr >= 0 ? locate_(String(upVals[upRow][iAddr] || '').trim()) : '';
       if (addrOld && address && addrOld !== address) pairs.push({ name: 'Address', old: addrOld, nw: address, warn: true });
-      var userOld = iUser >= 0 ? locate_(String(upVals[upRow][iUser] || '').trim()) : '';
-      if (userOld && userid && userOld !== userid) pairs.push({ name: 'User ID', old: userOld, nw: userid, warn: true });
+      var userOld = isLatest ? userIdInDoc_(docId) : '';
+      if (!userOld && iUser >= 0)
+        userOld = locate_(String(upVals[upRow][iUser] || '').trim());
+      if (userOld && userid && userOld !== userid)
+        pairs.push({ name: 'User ID', old: userOld, nw: userid, warn: true });
     }
   }
 
@@ -2218,7 +2339,11 @@ function editBill_(body) {
 
   var currentUpcomingHeader = up.getRange(1, 1, 1, up.getLastColumn()).getValues()[0];
   var currentExpireIndex = colOf_(currentUpcomingHeader, 'Expire Date');
-  if (currentExpireIndex >= 0) normalizeUpcomingExpireDates_(up, currentExpireIndex);
+  if (upUpdated && currentExpireIndex >= 0) {
+    sortUpcomingByExpire_(up, currentExpireIndex);
+  } else if (currentExpireIndex >= 0) {
+    normalizeUpcomingExpireDates_(up, currentExpireIndex);
+  }
 
   return {
     ok: true, customer: cust, invoice_no: newInv,
@@ -2249,6 +2374,11 @@ function billViaCustomerDoc_(custName, last, oldExp, lastMonths, bill) {
   var dateText = invoiceDateTextInDoc_(docId);
   if (!dateText) {
     throw new Error('Invoice Date label/value could not be located in the customer Google Doc table. The document was not changed and GST RECORDS was not updated.');
+  }
+  var currentDocUserId = userIdInDoc_(docId);
+  var desiredUserId = String(bill.userid || currentDocUserId || '').trim();
+  if (currentDocUserId && desiredUserId && currentDocUserId !== desiredUserId) {
+    pairs.push({ name: 'User ID', old: currentDocUserId, nw: desiredUserId, warn: true });
   }
   pairs.forEach(function (p) {
     if (p.name === 'Bill Period' && perM && p.old !== p.nw) p.old = perM[0];
@@ -2310,6 +2440,9 @@ function addCustomer_(body) {
   var iName = colOf_(upVals[0], 'Customer name');
   var iExp = colOf_(upVals[0], 'Expire Date');
   if (iName < 0 || iExp < 0) throw new Error('UPCOMING BILLS needs "Customer name" and "Expire Date" columns');
+  var iSrNo = upcomingSrNoColumn_(upVals[0]);
+  if (iSrNo < 0)
+    throw new Error('UPCOMING BILLS needs an Sr No column (accepted headers: Sr No, Sr. No., S.No., Serial No)');
   var iDur = colOf_(upVals[0], COL_DURATION);
   var iAddr = colOf_(upVals[0], COL_ADDRESS);
   var iUser = colOf_(upVals[0], COL_USERID);
@@ -2404,8 +2537,9 @@ function addCustomer_(body) {
     if (buyerOld) pairs.push({ name: 'Buyer', old: buyerOld, nw: name });
     var addrOld = locate_(donor.addr);
     if (addrOld) pairs.push({ name: 'Address', old: addrOld, nw: address, warn: true });
-    var userOld = locate_(donor.user);
-    if (userOld) pairs.push({ name: 'User ID', old: userOld, nw: userid || '-', warn: true });
+    var userOld = userIdInDoc_(copyId) || locate_(donor.user);
+    if (userOld && userOld !== (userid || '-'))
+      pairs.push({ name: 'User ID', old: userOld, nw: userid || '-', warn: true });
     var gstinOld = locate_(donor.last.gstin);
     if (gstinOld && gstin) {
       // customer HAS a GSTIN — swap the value, label stays
@@ -2459,14 +2593,13 @@ function addCustomer_(body) {
   writeBillPeriod_(gst, ensureBillPeriodCol_(gst), firstRow - 1, periodStart, periodEnd);
 
   var newRow = up.getLastRow() + 1;
+  up.getRange(newRow, iSrNo + 1).setValue(nextUpcomingSrNo_(up, iSrNo));
   up.getRange(newRow, iName + 1).setValue(sheetName);
   var expCell = up.getRange(newRow, iExp + 1);
   expCell.setNumberFormat('dd/mm/yy');
   expCell.setValue(periodEnd);
   if (iDur >= 0) up.getRange(newRow, iDur + 1).setValue(durationText_(months));
-  if (address && iAddr < 0) iAddr = ensureTextColumn_(up, COL_ADDRESS);
   if (address && iAddr >= 0) up.getRange(newRow, iAddr + 1).setValue(address);
-  if (userid && iUser < 0) iUser = ensureTextColumn_(up, COL_USERID);
   if (userid && iUser >= 0) up.getRange(newRow, iUser + 1).setValue(userid);
   sortUpcomingByExpire_(up, iExp);
 
@@ -3324,18 +3457,6 @@ function templateValues_(bill) {
 }
 
 /* ------------------------------------------------------------- pdf utilities */
-
-/** Ensures UPCOMING BILLS has a plain-text column; returns its 0-based index. */
-function ensureTextColumn_(up, title) {
-  var header = up.getDataRange().getValues()[0];
-  for (var i = 0; i < header.length; i++) {
-    if (String(header[i]).trim().toLowerCase() === title.toLowerCase()) return i;
-  }
-  var idx = header.length;
-  up.getRange(1, idx + 1).setValue(title);
-  SpreadsheetApp.flush();
-  return idx;
-}
 
 /** Convert full document wording into the compact label stored in GST
  *  RECORDS, e.g. "100 Mbps (1 Month)". Empty means it could not be parsed. */
