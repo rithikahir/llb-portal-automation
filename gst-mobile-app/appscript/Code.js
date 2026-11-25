@@ -1912,6 +1912,10 @@ function billEditPrefill_(body) {
       var actualBuyerName = buyerNameInDoc_(docId);
       if (actualBuyerName) prefillBuyerName = actualBuyerName;
     } catch (buyerReadErr) { /* retain GST RECORDS fallback */ }
+  }
+  // The customer Doc is the source document used for both latest and older
+  // invoice PDF edit copies, so use its printed User ID for either invoice.
+  if (docId) {
     try {
       var actualUserId = userIdInDoc_(docId);
       if (actualUserId) prefillUserId = actualUserId;
@@ -2206,7 +2210,9 @@ function editBill_(body) {
     if (upRow >= 0) {
       var addrOld = iAddr >= 0 ? locate_(String(upVals[upRow][iAddr] || '').trim()) : '';
       if (addrOld && address && addrOld !== address) pairs.push({ name: 'Address', old: addrOld, nw: address, warn: true });
-      var userOld = isLatest ? userIdInDoc_(docId) : '';
+      // For latest bills this anchor updates the live Doc; for older bills
+      // editCustomerDoc_ applies it only to the throwaway PDF-generation copy.
+      var userOld = userIdInDoc_(docId);
       if (!userOld && iUser >= 0)
         userOld = locate_(String(upVals[upRow][iUser] || '').trim());
       if (userOld && userid && userOld !== userid)
