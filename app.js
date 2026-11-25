@@ -138,7 +138,8 @@ var API_LOADING_LABELS_ = {
   update_payment: 'Saving…',
   edit_bill: 'Saving changes…',
   add_customer: 'Creating customer…',
-  get_pdf: 'Loading PDF…'
+  get_pdf: 'Loading PDF…',
+  share_pdf: 'Opening share…'
 };
 
 function startApiButtonLoading_(action) {
@@ -224,8 +225,10 @@ function downloadBlob(blob, name) {
 }
 function shareBlob(blob, name) {
   if (navigator.canShare && navigator.canShare({ files: [new File([blob], name, { type: 'application/pdf' })] })) {
+    var buttonState = startApiButtonLoading_('share_pdf');
     return navigator.share({ files: [new File([blob], name, { type: 'application/pdf' })], title: name })
-      .catch(function () { });
+      .catch(function () { })
+      .finally(function () { finishApiButtonLoading_(buttonState); });
   }
   downloadBlob(blob, name);
 }
