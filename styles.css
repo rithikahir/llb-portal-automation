@@ -246,6 +246,13 @@ body {
 .scope-chip { display: inline-flex; align-items: center; gap: 7px; background: var(--accent-soft); color: var(--accent); border-radius: 999px; padding: 5px 6px 5px 12px; font-size: 12.5px; font-weight: 700; margin-bottom: 10px; }
 .scope-chip button { border: 0; background: rgba(67,56,202,.16); color: var(--accent); width: 22px; height: 22px; border-radius: 50%; font-weight: 800; cursor: pointer; line-height: 1; }
 
+/* ---------- PDF render progress ---------- */
+.pdf-render-loading {
+  min-height: 180px; display: flex; flex-direction: column;
+  align-items: center; justify-content: center; gap: 8px;
+  color: var(--muted); text-align: center; padding: 28px 16px;
+}
+
 /* ---------- empty state ---------- */
 .empty { text-align: center; color: var(--muted); padding: 40px 20px; }
 .empty .big { font-size: 40px; margin-bottom: 8px; }
