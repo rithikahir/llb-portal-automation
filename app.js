@@ -1258,7 +1258,7 @@ function drawBillForm_(app, c, defDesc, defUserId) {
     '<div class="field"><label>Payment mode</label><input id="f_mode" value="' + esc(defMode) + '"></div>' +
     '<div class="field"><label>User id</label><input id="f_userid" value="' + esc(defUserId || c.userid || '') + '" placeholder="e.g. HINDUSTAN"></div>' +
     '</div>' +
-    '<div class="field"><label>Buyer address (saved to sheet for next time)</label>' +
+    '<div class="field"><label>Buyer address (printed on bill)</label>' +
     '<textarea id="f_address" placeholder="Street, area, Pune - PIN">' + esc(c.address || '') + '</textarea></div>' +
     '</div>' +
 
