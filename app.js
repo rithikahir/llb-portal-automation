@@ -1123,6 +1123,7 @@ function renderBillEdit(app, params) {
           duration_months: parseInt($('#e_months').value, 10) || 1,
           amount: parseFloat($('#e_amount').value)
         };
+        if (!body.address) { toast('Enter the customer address', true); return; }
         if (!(body.amount > 0)) { toast('Enter a valid amount', true); return; }
         if (!body.invoice_date) { toast('Pick the invoice date', true); return; }
         if (!body.period_start || !body.period_end) {
