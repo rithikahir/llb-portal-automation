@@ -2197,8 +2197,7 @@ function invoiceDateTextInDoc_(docId) {
 function buyerNameInDoc_(docId) {
   var doc = DocumentApp.openById(docId);
   var roots = [doc.getBody(), doc.getHeader(), doc.getFooter()];
-  function cleanCandidate_(value) {    var v = String(value || '').replace(/\u00A0/g, ' ').trim();
-    if (!v || /^(GSTIN|GSTIN \/ UIN|State Name|SAC Code|Invoice Date|Invoice No)\b/i.test(v)) return '';
+  function cleanCandidate_(value) {    var v = String(value || '').replace(/\u00A0/g, ' ').trim();    if (!v || /^(GSTIN|GSTIN \/ UIN|State Name|SAC Code|Invoice Date|Invoice No)\b/i.test(v)) return '';
     return v;
   }
 
@@ -2722,8 +2721,9 @@ function docDescBlock_(text) {
   var best = [], cur = [];
   for (var i = 0; i <= lines.length; i++) {
     var s = i < lines.length ? lines[i].trim() : '';
-    var ok = s.length >= 8 && !/[a-z]/.test(s) && /[A-Z]/.test(s) &&
-             /MBPS|PLAN|SPEED|UNLIMITED|BROADBAND|FIBER|FIBRE/.test(s);
+    var upper = s.toUpperCase();
+    var ok = s.length >= 8 && /[A-Z]/i.test(s) &&
+             /MBPS|PLAN|SPEED|UNLIMITED|BROADBAND|FIBER|FIBRE/.test(upper);
     if (ok) cur.push(s);
     else { if (cur.length > best.length) best = cur; cur = []; }
   }
@@ -3073,6 +3073,11 @@ function editBill_(body) {
   if (requestedDateText && !newDate)
     throw new Error('invoice_date must be a valid yyyy-mm-dd date');
   var ps = parseISO_(body.period_start), pe = parseISO_(body.period_end);
+  var requestedMonths = parseInt(body.duration_months, 10);
+  if (requestedMonths > 0 && ps) {
+    // The selected duration is authoritative for the end date.
+    pe = addDays_(addMonths_(ps, requestedMonths), -1);
+  }
   if (!(ps && pe)) throw new Error('bill period (start + end) is required — ' +
     'read it from the bill\'s current PDF (View in the app)');
 
@@ -4819,4 +4824,3 @@ function rupeeWords_(n) {
   if (rest) parts.push(three(rest));
   return parts.join(' ').replace(/\s+/g, ' ').trim();
 }
-
