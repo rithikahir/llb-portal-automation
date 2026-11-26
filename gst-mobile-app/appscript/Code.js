@@ -107,6 +107,10 @@ function doPost(e) {
     if (body.action === 'backfill_periods') return jsonOut_(backfillPeriods_(body));
     if (body.action === 'bill_edit_prefill') return jsonOut_(billEditPrefill_(body));
     if (body.action === 'edit_bill') return jsonOut_(editBill_(body));
+    if (body.action === 'delete_customer') return jsonOut_(deleteCustomer_(body));
+    if (body.action === 'list_deleted') return jsonOut_(listDeletedCustomers_(body));
+    if (body.action === 'restore_customer') return jsonOut_(restoreDeletedCustomer_(body));
+    if (body.action === 'purge_deleted_customer') return jsonOut_(purgeDeletedCustomer_(body));
     return jsonOut_({ ok: false, error: 'unknown action: ' + body.action });
   } catch (err) {
     return jsonOut_({ ok: false, error: String(err && err.message || err) });
@@ -122,6 +126,7 @@ function doGet() {
                               'list_pdfs', 'get_pdf', 'map_doc', 'add_customer',
                     'repair_doc', 'update_payment', 'refresh_pdf',
                     'bill_prefill', 'bill_edit_prefill', 'edit_bill', 'backfill_periods',
+                    'delete_customer', 'list_deleted', 'restore_customer', 'purge_deleted_customer',
                               'debug_rebuild'] });
 }
 
@@ -1073,6 +1078,646 @@ function rememberCustomerRenameAliases_(oldNames, newName, docId, canonicalGstNa
 
 /** sync_docs: walk the docs folder recursively, fuzzy-match every Google Doc
  *  to a UPCOMING BILLS customer and store the mapping. Read-only for docs. */
+/* ------------------------------------------------------- customer recycle bin */
+
+/** A dedicated recycle bin under the Gst_Bills source folder. */
+function customerBinFolder_(create) {
+  var root = docsFolder_();
+  var it = root.getFoldersByName('BIN');
+  if (it.hasNext()) return it.next();
+  return create ? root.createFolder('BIN') : null;
+}
+
+function loadJsonProperty_(key) {
+  try { return JSON.parse(PROPS.getProperty(key) || '{}'); }
+  catch (e) { return {}; }
+}
+
+/** Resolve the exact account identity plus all recorded aliases. */
+function customerIdentityContext_(customer) {
+  var canonical = canonicalCustomerName_(customer);
+  var keys = {};
+  function add(value) {
+    var key = normName_(value);
+    if (key) keys[key] = true;
+  }
+  add(customer);
+  add(canonical);
+
+  var names = loadCustomerNameAliases_();
+  Object.keys(names).forEach(function (key) {
+    if (canonicalCustomerName_(key) === canonical) {
+      add(key);
+      add(names[key]);
+    }
+  });
+
+  var docsMap = loadJsonProperty_('DOCS_MAP');
+  var manualMap = loadManualMap_();
+  [docsMap, manualMap].forEach(function (map) {
+    Object.keys(map).forEach(function (key) {
+      if (canonicalCustomerName_(key) === canonical) add(key);
+    });
+  });
+
+  return {
+    canonical: canonical,
+    keys: keys,
+    matches: function (value) {
+      var key = normName_(value);
+      return !!key && (!!keys[key] || canonicalCustomerName_(value) === canonical);
+    }
+  };
+}
+
+function packBinCell_(value) {
+  if (value instanceof Date) return { __gstBinType: 'date', value: value.toISOString() };
+  return value;
+}
+function unpackBinCell_(value) {
+  if (value && typeof value === 'object' && value.__gstBinType === 'date')
+    return new Date(value.value);
+  return value;
+}
+
+/** Snapshot the complete source rows, including hidden columns and formulas. */
+function snapshotSheetRows_(sheet, rowNumbers) {
+  var lastCol = sheet.getLastColumn();
+  var headers = sheet.getRange(1, 1, 1, lastCol).getValues()[0].map(function (v) {
+    return String(v === null || v === undefined ? '' : v);
+  });
+  var rows = rowNumbers.map(function (rowNumber) {
+    var range = sheet.getRange(rowNumber, 1, 1, lastCol);
+    return {
+      sourceRow: rowNumber,
+      values: range.getValues()[0].map(packBinCell_),
+      formulas: range.getFormulas()[0]
+    };
+  });
+  return { headers: headers, rows: rows };
+}
+
+function binHeaderIndex_(headers, title) {
+  var key = String(title || '').trim().toLowerCase();
+  for (var i = 0; i < headers.length; i++) {
+    if (String(headers[i] || '').trim().toLowerCase() === key) return i;
+  }
+  return -1;
+}
+
+/** Restore saved rows by header name, so a later-added sheet column is safe. */
+function restoreSheetSnapshot_(sheet, snapshot, kind, identity) {
+  if (!snapshot || !snapshot.rows || !snapshot.rows.length) return 0;
+  var lastCol = sheet.getLastColumn();
+  var currentHeaders = sheet.getRange(1, 1, 1, lastCol).getValues()[0].map(function (v) {
+    return String(v === null || v === undefined ? '' : v);
+  });
+  var sourceNameIndex = binHeaderIndex_(snapshot.headers, kind === 'gst' ? 'Customer Name' : 'Customer name');
+  var sourceInvoiceIndex = binHeaderIndex_(snapshot.headers, 'Invoice No');
+  var currentInvoiceIndex = binHeaderIndex_(currentHeaders, 'Invoice No');
+  var currentNameIndex = binHeaderIndex_(currentHeaders, kind === 'gst' ? 'Customer Name' : 'Customer name');
+  var existingInvoices = {};
+  var existingNames = {};
+  var currentValues = sheet.getDataRange().getValues();
+  for (var r = 1; r < currentValues.length; r++) {
+    if (kind === 'gst' && currentInvoiceIndex >= 0) {
+      existingInvoices[String(currentValues[r][currentInvoiceIndex] || '').trim()] = true;
+    }
+    if (kind === 'upcoming' && currentNameIndex >= 0) {
+      var currentName = String(currentValues[r][currentNameIndex] || '').trim();
+      if (currentName) existingNames[normName_(currentName)] = true;
+    }
+  }
+
+  var appended = 0;
+  snapshot.rows.forEach(function (saved) {
+    var savedName = sourceNameIndex >= 0 ? String(unpackBinCell_(saved.values[sourceNameIndex]) || '').trim() : '';
+    var savedInvoice = sourceInvoiceIndex >= 0 ? String(unpackBinCell_(saved.values[sourceInvoiceIndex]) || '').trim() : '';
+    if (kind === 'gst' && savedInvoice && existingInvoices[savedInvoice]) return;
+    if (kind === 'upcoming' && savedName && existingNames[normName_(savedName)]) return;
+
+    var values = new Array(lastCol).fill('');
+    var formulasToSet = [];
+    for (var c = 0; c < currentHeaders.length; c++) {
+      var currentKey = String(currentHeaders[c] || '').trim().toLowerCase();
+      var sourceIndex = -1;
+      for (var s = 0; s < snapshot.headers.length; s++) {
+        if (String(snapshot.headers[s] || '').trim().toLowerCase() === currentKey && currentKey) {
+          sourceIndex = s; break;
+        }
+      }
+      // Blank/unlabelled columns retain their original positional value.
+      if (sourceIndex < 0 && !currentKey && c < saved.values.length) sourceIndex = c;
+      if (sourceIndex < 0 || sourceIndex >= saved.values.length) continue;
+      values[c] = unpackBinCell_(saved.values[sourceIndex]);
+      var formula = saved.formulas && saved.formulas[sourceIndex] || '';
+      if (formula) formulasToSet.push({ column: c + 1, formula: formula });
+    }
+    var rowNumber = sheet.getLastRow() + 1;
+    sheet.getRange(rowNumber, 1, 1, lastCol).setValues([values]);
+    formulasToSet.forEach(function (f) {
+      sheet.getRange(rowNumber, f.column).setFormula(f.formula);
+    });
+
+    if (kind === 'gst') {
+      if (savedInvoice) existingInvoices[savedInvoice] = true;
+    } else if (kind === 'upcoming') {
+      if (savedName) existingNames[normName_(savedName)] = true;
+      var expireIndex = binHeaderIndex_(currentHeaders, 'Expire Date');
+      if (expireIndex >= 0) sheet.getRange(rowNumber, expireIndex + 1).setNumberFormat('dd/mm/yy');
+    }
+    appended++;
+  });
+  return appended;
+}
+
+function deleteSheetRows_(sheet, rowNumbers) {
+  rowNumbers.slice().sort(function (a, b) { return b - a; }).forEach(function (row) {
+    if (row >= 2 && row <= sheet.getLastRow()) sheet.deleteRow(row);
+  });
+}
+
+function firstParentId_(driveItem) {
+  var parents = driveItem.getParents();
+  if (!parents.hasNext()) throw new Error('Cannot determine original Drive folder for "' + driveItem.getName() + '"');
+  return parents.next().getId();
+}
+
+function moveBinDocsBack_(manifest, binDocsFolder) {
+  var restored = [];
+  (manifest.movedDocs || []).forEach(function (item) {
+    var file = DriveApp.getFileById(item.id);
+    var parent = DriveApp.getFolderById(item.originalParentId);
+    file.moveTo(parent);
+    restored.push(item);
+  });
+  return restored;
+}
+
+function restoreBinDocsToBin_(items, binDocsFolder) {
+  (items || []).forEach(function (item) {
+    try { DriveApp.getFileById(item.id).moveTo(binDocsFolder); } catch (e) {}
+  });
+}
+
+function mapEntriesForIdentity_(map, identity, docIds) {
+  var entries = {};
+  Object.keys(map || {}).forEach(function (key) {
+    var id = String(map[key] || '');
+    if (identity.matches(key) || (id && docIds[id])) entries[key] = map[key];
+  });
+  return entries;
+}
+
+function removeMapEntries_(map, entries) {
+  Object.keys(entries || {}).forEach(function (key) { delete map[key]; });
+  return map;
+}
+
+function restoreMapEntries_(map, entries) {
+  Object.keys(entries || {}).forEach(function (key) { map[key] = entries[key]; });
+  return map;
+}
+
+function writeBinManifest_(folder, manifest) {
+  var it = folder.getFilesByName('__restore_manifest.json');
+  var file;
+  if (it.hasNext()) file = it.next();
+  else file = folder.createFile('__restore_manifest.json', '{}', MimeType.PLAIN_TEXT);
+  file.setContent(JSON.stringify(manifest));
+  return file.getId();
+}
+
+function readBinManifest_(folder) {
+  var it = folder.getFilesByName('__restore_manifest.json');
+  if (!it.hasNext()) throw new Error('Bin entry is missing its restore manifest');
+  var file = it.next();
+  var manifest;
+  try { manifest = JSON.parse(file.getBlob().getDataAsString()); }
+  catch (e) { throw new Error('Bin restore manifest is unreadable: ' + e.message); }
+  if (!manifest || manifest.version !== 1) throw new Error('Unsupported or invalid Bin manifest');
+  return { file: file, data: manifest };
+}
+
+function collectCustomerDocs_(identity, invoiceNumbers, docsMap, manualMap) {
+  var ids = {};
+  Object.keys(docsMap || {}).forEach(function (key) {
+    if (identity.matches(key) && docsMap[key]) ids[String(docsMap[key])] = true;
+  });
+  Object.keys(manualMap || {}).forEach(function (key) {
+    if (identity.matches(key) && manualMap[key]) ids[String(manualMap[key])] = true;
+  });
+
+  var byName = {};
+  Object.keys(identity.keys).forEach(function (key) { byName[key] = true; });
+  var invoiceLookup = {};
+  (invoiceNumbers || []).forEach(function (number) {
+    if (number) invoiceLookup[String(number)] = true;
+  });
+
+  var root = docsFolder_();
+  var bin = customerBinFolder_(false);
+  var pdfRoot = pdfsRoot_();
+  var foundFiles = [];
+  function walk(folder) {
+    var files = folder.getFiles();
+    while (files.hasNext()) {
+      var file = files.next();
+      if (file.getMimeType() !== MimeType.GOOGLE_DOCS) continue;
+      var id = file.getId();
+      var stem = String(file.getName() || '').replace(/\.(docx?)$/i, '').replace(/[_\s-]?BILL$/i, '');
+      var match = !!byName[normName_(stem)];
+      if (!match && Object.keys(invoiceLookup).length) {
+        try {
+          var text = docText_(id);
+          Object.keys(invoiceLookup).some(function (invoiceNo) {
+            if (text.indexOf(invoiceNo) >= 0) { match = true; return true; }
+            return false;
+          });
+        } catch (e) { /* unmapped/unreadable docs are not selected by fuzzy name */ }
+      }
+      if (match) ids[id] = true;
+    }
+
+    var folders = folder.getFolders();
+    while (folders.hasNext()) {
+      var child = folders.next();
+      if (child.getName().toUpperCase() === 'BIN') continue;
+      if (pdfRoot && child.getId() === pdfRoot.getId()) continue;
+      walk(child);
+    }
+  }
+  walk(root);
+
+  var out = [];
+  Object.keys(ids).forEach(function (id) {
+    var file = DriveApp.getFileById(id);
+    if (file.getMimeType() !== MimeType.GOOGLE_DOCS)
+      throw new Error('Mapped Drive item is not a Google Doc: ' + file.getName());
+    out.push({ id: id, name: file.getName(), originalParentId: firstParentId_(file) });
+  });
+  return out;
+}
+
+/** Remove active GST/Upcoming rows only after Drive assets have been moved. */
+function deleteCustomer_(body) {
+  var customer = String(body.customer || '').trim();
+  if (!customer) throw new Error('customer is required');
+
+  var lock = LockService.getScriptLock();
+  if (!lock.tryLock(30000)) throw new Error('Another billing or customer operation is running. Try again.');
+  var binEntry = null, movedDocs = [], movedPdfFolder = false, manifest = null;
+  var ss, up, gst, upcomingRows = [], gstRows = [], docBin, pdfBin;
+  try {
+    ss = SpreadsheetApp.openById(SHEET_ID);
+    up = ss.getSheetByName(UPCOMING_SHEET);
+    gst = ss.getSheetByName(GST_SHEET);
+    if (!up || !gst) throw new Error('Required spreadsheet tabs were not found');
+
+    var identity = customerIdentityContext_(customer);
+    var upVals = up.getDataRange().getValues();
+    var gstVals = gst.getDataRange().getValues();
+    var upNameIndex = colOf_(upVals[0], 'Customer name');
+    var gstNameIndex = colOf_(gstVals[0], 'Customer Name');
+    var invoiceIndex = colOf_(gstVals[0], 'Invoice No');
+    var upRowNumbers = [], gstRowNumbers = [], invoiceNumbers = [];
+
+    for (var u = 1; u < upVals.length; u++) {
+      if (upNameIndex >= 0 && identity.matches(upVals[u][upNameIndex])) upRowNumbers.push(u + 1);
+    }
+    for (var g = 1; g < gstVals.length; g++) {
+      if (gstNameIndex >= 0 && identity.matches(gstVals[g][gstNameIndex])) {
+        gstRowNumbers.push(g + 1);
+        if (invoiceIndex >= 0) invoiceNumbers.push(String(gstVals[g][invoiceIndex] || '').trim());
+      }
+    }
+    if (!upRowNumbers.length && !gstRowNumbers.length &&
+        !customerDocId_(customer) && !customerFolder_(customer, false)) {
+      throw new Error('No active sheet records, mapped document or archived PDF folder was found for ' + customer);
+    }
+
+    var docsMap = loadJsonProperty_('DOCS_MAP');
+    var manualMap = loadManualMap_();
+    var movedDocRecords = collectCustomerDocs_(identity, invoiceNumbers, docsMap, manualMap);
+    var docIds = {};
+    movedDocRecords.forEach(function (item) { docIds[item.id] = true; });
+    var docMapEntries = mapEntriesForIdentity_(docsMap, identity, docIds);
+    var manualMapEntries = mapEntriesForIdentity_(manualMap, identity, docIds);
+
+    var pdfFolder = customerFolder_(customer, false);
+    var pdfFolderRecord = null;
+    if (pdfFolder) {
+      pdfFolderRecord = {
+        id: pdfFolder.getId(),
+        name: pdfFolder.getName(),
+        originalParentId: firstParentId_(pdfFolder)
+      };
+    }
+
+    var gstSnapshot = snapshotSheetRows_(gst, gstRowNumbers);
+    var upcomingSnapshot = snapshotSheetRows_(up, upRowNumbers);
+    var binRoot = customerBinFolder_(true);
+    var stamp = Utilities.formatDate(new Date(), Session.getScriptTimeZone(), 'yyyyMMdd_HHmmss');
+    var entryName = sanitizeFile_(customer) + '__' + stamp + '__' + Utilities.getUuid().slice(0, 8);
+    binEntry = binRoot.createFolder(entryName);
+    docBin = binEntry.createFolder('Google Docs');
+    pdfBin = binEntry.createFolder('PDFs');
+
+    manifest = {
+      version: 1,
+      status: 'MOVING',
+      deletedAt: new Date().toISOString(),
+      customer: customer,
+      identityAliases: Object.keys(identity.keys),
+      invoiceCount: invoiceNumbers.length,
+      invoiceNumbers: invoiceNumbers,
+      upcomingSnapshot: upcomingSnapshot,
+      gstSnapshot: gstSnapshot,
+      movedDocs: [],
+      pdfFolder: pdfFolderRecord,
+      docMapEntries: docMapEntries,
+      manualMapEntries: manualMapEntries,
+      binEntryId: binEntry.getId()
+    };
+    writeBinManifest_(binEntry, manifest);
+
+    movedDocRecords.forEach(function (item) {
+      DriveApp.getFileById(item.id).moveTo(docBin);
+      movedDocs.push(item);
+      manifest.movedDocs.push(item);
+      writeBinManifest_(binEntry, manifest);
+    });
+
+    if (pdfFolderRecord) {
+      DriveApp.getFolderById(pdfFolderRecord.id).moveTo(pdfBin);
+      movedPdfFolder = true;
+    }
+    manifest.status = 'DRIVE_MOVED';
+    writeBinManifest_(binEntry, manifest);
+
+    deleteSheetRows_(up, upRowNumbers);
+    deleteSheetRows_(gst, gstRowNumbers);
+
+    docsMap = removeMapEntries_(docsMap, docMapEntries);
+    manualMap = removeMapEntries_(manualMap, manualMapEntries);
+    saveDocsMap_(docsMap);
+    saveManualMap_(manualMap);
+
+    manifest.status = 'DELETED';
+    manifest.deletedAt = new Date().toISOString();
+    writeBinManifest_(binEntry, manifest);
+    SpreadsheetApp.flush();
+
+    return {
+      ok: true,
+      customer: customer,
+      deleted_id: binEntry.getId(),
+      moved_documents: movedDocs.length,
+      moved_pdf_folder: !!pdfFolderRecord,
+      removed_upcoming_rows: upRowNumbers.length,
+      removed_gst_rows: gstRowNumbers.length
+    };
+  } catch (err) {
+    // Best-effort rollback: put sheet rows, docs, PDF folder and mappings back.
+    try {
+      if (up && manifest) restoreSheetSnapshot_(up, manifest.upcomingSnapshot, 'upcoming');
+      if (gst && manifest) restoreSheetSnapshot_(gst, manifest.gstSnapshot, 'gst');
+      if (docBin) restoreBinDocsToBin_(movedDocs, docBin); // re-home first, then original parents below
+      movedDocs.slice().reverse().forEach(function (item) {
+        try { DriveApp.getFileById(item.id).moveTo(DriveApp.getFolderById(item.originalParentId)); } catch (e1) {}
+      });
+      if (movedPdfFolder && manifest && manifest.pdfFolder) {
+        try { DriveApp.getFolderById(manifest.pdfFolder.id).moveTo(DriveApp.getFolderById(manifest.pdfFolder.originalParentId)); } catch (e2) {}
+      }
+      if (manifest) {
+        var dm = loadJsonProperty_('DOCS_MAP');
+        var mm = loadManualMap_();
+        saveDocsMap_(restoreMapEntries_(dm, manifest.docMapEntries));
+        saveManualMap_(restoreMapEntries_(mm, manifest.manualMapEntries));
+      }
+      if (binEntry) binEntry.setTrashed(true);
+    } catch (rollbackErr) {
+      throw new Error(String(err && err.message || err) +
+        ' | Rollback also reported: ' + String(rollbackErr && rollbackErr.message || rollbackErr) +
+        '. Check the BIN folder before retrying.');
+    }
+    throw err;
+  } finally {
+    lock.releaseLock();
+  }
+}
+
+function listDeletedCustomers_(body) {
+  var binRoot = customerBinFolder_(false);
+  if (!binRoot) return { ok: true, items: [] };
+  var items = [], folders = binRoot.getFolders();
+  while (folders.hasNext()) {
+    var folder = folders.next();
+    try {
+      var found = readBinManifest_(folder);
+      var manifest = found.data;
+      if (manifest.status !== 'DELETED') continue;
+      var lastExpire = '';
+      if (manifest.upcomingSnapshot && manifest.upcomingSnapshot.rows.length) {
+        var headers = manifest.upcomingSnapshot.headers;
+        var expIndex = binHeaderIndex_(headers, 'Expire Date');
+        if (expIndex >= 0) {
+          var expiry = unpackBinCell_(manifest.upcomingSnapshot.rows[0].values[expIndex]);
+          if (expiry instanceof Date) lastExpire = fmtDMY_(expiry);
+          else lastExpire = String(expiry || '');
+        }
+      }
+      items.push({
+        id: folder.getId(),
+        customer: manifest.customer,
+        deleted_at: manifest.deletedAt,
+        invoice_count: (manifest.invoiceNumbers || []).length,
+        upcoming_rows: manifest.upcomingSnapshot ? manifest.upcomingSnapshot.rows.length : 0,
+        expire_date: lastExpire
+      });
+    } catch (e) {
+      // Ignore unrelated/manual folders in BIN; only valid manifests are app entries.
+    }
+  }
+  items.sort(function (a, b) { return String(b.deleted_at).localeCompare(String(a.deleted_at)); });
+  return { ok: true, items: items };
+}
+
+function binEntryById_(entryId) {
+  var id = String(entryId || '').trim();
+  if (!id) throw new Error('deleted customer id is required');
+  var root = customerBinFolder_(false);
+  if (!root) throw new Error('BIN folder does not exist');
+  var folder;
+  try { folder = DriveApp.getFolderById(id); }
+  catch (e) { throw new Error('Deleted customer folder was not found in BIN'); }
+  var parents = folder.getParents();
+  var belongs = false;
+  while (parents.hasNext()) if (parents.next().getId() === root.getId()) belongs = true;
+  if (!belongs) throw new Error('The selected folder is not a direct entry in BIN');
+  var found = readBinManifest_(folder);
+  if (found.data.status !== 'DELETED') throw new Error('This Bin entry is not in a restorable deleted state');
+  return { folder: folder, manifestFile: found.file, manifest: found.data };
+}
+
+function validateRestoreHasNoConflict_(manifest) {
+  var ss = SpreadsheetApp.openById(SHEET_ID);
+  var up = ss.getSheetByName(UPCOMING_SHEET);
+  var gst = ss.getSheetByName(GST_SHEET);
+  var upVals = up.getDataRange().getValues(), gstVals = gst.getDataRange().getValues();
+  var identity = { matches: function (value) {
+    var key = normName_(value);
+    if (!key) return false;
+    if (key === normName_(manifest.customer)) return true;
+    return (manifest.identityAliases || []).indexOf(key) >= 0 ||
+      canonicalCustomerName_(value) === canonicalCustomerName_(manifest.customer);
+  }};
+  var upNameIndex = colOf_(upVals[0], 'Customer name');
+  for (var r = 1; r < upVals.length; r++) {
+    if (upNameIndex >= 0 && identity.matches(upVals[r][upNameIndex]))
+      throw new Error('A customer with this name is already active. Rename or remove the active record before restoring.');
+  }
+  var invIndex = colOf_(gstVals[0], 'Invoice No');
+  var existing = {};
+  for (var g = 1; g < gstVals.length; g++) {
+    if (invIndex >= 0) existing[String(gstVals[g][invIndex] || '').trim()] = true;
+  }
+  (manifest.invoiceNumbers || []).forEach(function (invoiceNo) {
+    if (existing[invoiceNo]) throw new Error('Invoice ' + invoiceNo + ' already exists in active GST RECORDS. Restore was stopped to avoid duplicates.');
+  });
+}
+
+function restoreDeletedCustomer_(body) {
+  var lock = LockService.getScriptLock();
+  if (!lock.tryLock(30000)) throw new Error('Another billing or customer operation is running. Try again.');
+  var binInfo = null, movedBackDocs = [], movedBackPdf = false, rowsRestored = false;
+  var binDocs = null, binPdfs = null;
+  try {
+    binInfo = binEntryById_(body.deleted_id);
+    var manifest = binInfo.manifest;
+    validateRestoreHasNoConflict_(manifest);
+
+    var sub = binInfo.folder.getFolders();
+    while (sub.hasNext()) {
+      var child = sub.next();
+      if (child.getName() === 'Google Docs') binDocs = child;
+      if (child.getName() === 'PDFs') binPdfs = child;
+    }
+
+    // Return files to their original Drive parents before exposing sheet rows.
+    (manifest.movedDocs || []).forEach(function (item) {
+      var file = DriveApp.getFileById(item.id);
+      file.moveTo(DriveApp.getFolderById(item.originalParentId));
+      movedBackDocs.push(item);
+    });
+    if (manifest.pdfFolder) {
+      DriveApp.getFolderById(manifest.pdfFolder.id)
+        .moveTo(DriveApp.getFolderById(manifest.pdfFolder.originalParentId));
+      movedBackPdf = true;
+    }
+
+    var ss = SpreadsheetApp.openById(SHEET_ID);
+    var up = ss.getSheetByName(UPCOMING_SHEET);
+    var gst = ss.getSheetByName(GST_SHEET);
+    restoreSheetSnapshot_(gst, manifest.gstSnapshot, 'gst');
+    restoreSheetSnapshot_(up, manifest.upcomingSnapshot, 'upcoming');
+    rowsRestored = true;
+
+    var docsMap = loadJsonProperty_('DOCS_MAP');
+    var manualMap = loadManualMap_();
+    saveDocsMap_(restoreMapEntries_(docsMap, manifest.docMapEntries));
+    saveManualMap_(restoreMapEntries_(manualMap, manifest.manualMapEntries));
+
+    var headers = up.getRange(1, 1, 1, up.getLastColumn()).getValues()[0];
+    var expireIndex = colOf_(headers, 'Expire Date');
+    if (expireIndex >= 0) sortUpcomingByExpire_(up, expireIndex);
+    SpreadsheetApp.flush();
+
+    var restoredName = manifest.customer;
+    var result = {
+      ok: true, customer: restoredName,
+      restored_documents: (manifest.movedDocs || []).length,
+      restored_pdf_folder: !!manifest.pdfFolder,
+      restored_upcoming_rows: manifest.upcomingSnapshot ? manifest.upcomingSnapshot.rows.length : 0,
+      restored_gst_rows: manifest.gstSnapshot ? manifest.gstSnapshot.rows.length : 0
+    };
+
+    // Mark before removing the Bin wrapper. If removing the wrapper fails, it
+    // must not reappear as an active restore option.
+    manifest.status = 'RESTORED';
+    writeBinManifest_(binInfo.folder, manifest);
+    try { binInfo.folder.setTrashed(true); } catch (cleanupErr) {}
+    return result;
+  } catch (err) {
+    // Keep the customer safely in the Bin if restore did not complete.
+    if (movedBackDocs.length && binDocs) {
+      movedBackDocs.forEach(function (item) {
+        try { DriveApp.getFileById(item.id).moveTo(binDocs); } catch (e1) {}
+      });
+    }
+    if (movedBackPdf && binPdfs && binInfo && binInfo.manifest.pdfFolder) {
+      try { DriveApp.getFolderById(binInfo.manifest.pdfFolder.id).moveTo(binPdfs); } catch (e2) {}
+    }
+    if (rowsRestored && binInfo) {
+      try {
+        var ss2 = SpreadsheetApp.openById(SHEET_ID);
+        var up2 = ss2.getSheetByName(UPCOMING_SHEET);
+        var gst2 = ss2.getSheetByName(GST_SHEET);
+        var identity = { matches: function (v) {
+          return normName_(v) === normName_(binInfo.manifest.customer) ||
+            (binInfo.manifest.identityAliases || []).indexOf(normName_(v)) >= 0;
+        }};
+        var upVals2 = up2.getDataRange().getValues(), gstVals2 = gst2.getDataRange().getValues();
+        var upName2 = colOf_(upVals2[0], 'Customer name'), gstInv2 = colOf_(gstVals2[0], 'Invoice No');
+        var upRows = [], gstRows = [], invs = {};
+        (binInfo.manifest.invoiceNumbers || []).forEach(function (v) { invs[v] = true; });
+        for (var ur = 1; ur < upVals2.length; ur++) if (upName2 >= 0 && identity.matches(upVals2[ur][upName2])) upRows.push(ur + 1);
+        for (var gr = 1; gr < gstVals2.length; gr++) if (gstInv2 >= 0 && invs[String(gstVals2[gr][gstInv2] || '').trim()]) gstRows.push(gr + 1);
+        deleteSheetRows_(up2, upRows);
+        deleteSheetRows_(gst2, gstRows);
+      } catch (e3) {}
+    }
+    throw err;
+  } finally {
+    lock.releaseLock();
+  }
+}
+
+/** Permanently remove a Drive item through Drive API v3 (not merely trash it). */
+function permanentlyDeleteDriveItem_(fileId) {
+  var url = 'https://www.googleapis.com/drive/v3/files/' + encodeURIComponent(fileId);
+  var response = UrlFetchApp.fetch(url, {
+    method: 'delete',
+    headers: { Authorization: 'Bearer ' + ScriptApp.getOAuthToken() },
+    muteHttpExceptions: true
+  });
+  var code = response.getResponseCode();
+  if (code !== 200 && code !== 204 && code !== 404)
+    throw new Error('Drive permanent delete failed for ' + fileId + ' (HTTP ' + code + '): ' +
+      String(response.getContentText() || '').slice(0, 250));
+}
+
+function permanentlyDeleteDriveTree_(folder) {
+  var files = folder.getFiles();
+  while (files.hasNext()) permanentlyDeleteDriveItem_(files.next().getId());
+  var folders = folder.getFolders();
+  while (folders.hasNext()) permanentlyDeleteDriveTree_(folders.next());
+  permanentlyDeleteDriveItem_(folder.getId());
+}
+
+function purgeDeletedCustomer_(body) {
+  var lock = LockService.getScriptLock();
+  if (!lock.tryLock(30000)) throw new Error('Another billing or customer operation is running. Try again.');
+  try {
+    var info = binEntryById_(body.deleted_id);
+    var customer = info.manifest.customer;
+    permanentlyDeleteDriveTree_(info.folder);
+    return { ok: true, permanently_deleted: true, customer: customer };
+  } finally {
+    lock.releaseLock();
+  }
+}
+
 function syncDocs_(body) {
   var ss = SpreadsheetApp.openById(SHEET_ID);
   var up = ss.getSheetByName(UPCOMING_SHEET);
@@ -1092,7 +1737,13 @@ function syncDocs_(body) {
                    isGoogleDoc: f.getMimeType() === MimeType.GOOGLE_DOCS });
     }
     var dit = folder.getFolders();
-    while (dit.hasNext()) { var d = dit.next(); walk(d, path + d.getName() + '/'); }
+    while (dit.hasNext()) {
+      var d = dit.next();
+      // The recycle bin is nested under Gst_Bills but must never be scanned
+      // by sync_docs; deleted customer Docs must stay out of the active map.
+      if (d.getName().toUpperCase() === 'BIN') continue;
+      walk(d, path + d.getName() + '/');
+    }
   }
   walk(docsFolder_(), '');
   var map = {}, report = [];
