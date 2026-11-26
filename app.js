@@ -1120,6 +1120,9 @@ function renderAddCustomer(app) {
     '<div class="card">' +
     '<div class="field"><label>Customer name (used consistently on bill, sheet and Drive) *</label>' +
     '<input id="a_name" placeholder="e.g. Sharma Traders" autocomplete="organization" required></div>' +
+    '<div class="field"><label for="a_docname">Google Doc filename *</label>' +
+    '<input id="a_docname" placeholder="e.g. BILL_Rithik" autocomplete="off" required>' +
+    '<div class="small">Defaults to BILL_ followed by the first part of the customer name. You can edit this filename independently.</div></div>' +
     '<div class="field"><label>Address (printed below the name) *</label>' +
     '<textarea id="a_address" placeholder="Street, area, Pune - PIN" required></textarea></div>' +
     '<div class="grid2">' +
@@ -1152,6 +1155,15 @@ function renderAddCustomer(app) {
     '</div></div>';
 
   $('#bk').onclick = back;
+  var docNameField = $('#a_docname');
+  docNameField.dataset.auto = '1';
+  docNameField.oninput = function () { this.dataset.auto = '0'; };
+  $('#a_name').oninput = function () {
+    if (docNameField.dataset.auto === '1') {
+      var firstNamePart = this.value.trim().split(/\s+/)[0] || '';
+      docNameField.value = firstNamePart ? 'BILL_' + firstNamePart : '';
+    }
+  };
   var todayISO = function () {
     var d = new Date();
     return d.getFullYear() + '-' + pad2(d.getMonth() + 1) + '-' + pad2(d.getDate());
@@ -1195,6 +1207,7 @@ function renderAddCustomer(app) {
 
   $('#doAdd').onclick = function () {
     var nm = $('#a_name').value.trim();
+    var docName = $('#a_docname').value.trim();
     var amt = parseFloat($('#a_amount').value);
     var m = parseInt($('#a_months').value, 10) || 1;
     var ad = $('#a_address').value.trim();
@@ -1202,18 +1215,19 @@ function renderAddCustomer(app) {
     var ds = $('#a_desc').value.trim();
     var start = $('#a_start').value;
     if (!nm) { toast('Enter the customer name', true); return; }
+    if (!docName) { toast('Enter a Google Doc filename', true); return; }
     if (!ad) { toast('Enter the address', true); return; }
     if (!uid) { toast('Enter the User ID', true); return; }
     if (!ds) { toast('Enter the plan description', true); return; }
     if (!(amt > 0) || !isFinite(amt)) { toast('Enter a valid plan amount', true); return; }
     if (!start) { toast('Select the bill period start date', true); return; }
-    if (!confirm('Onboard ' + nm + '?\n\nThe invoice date will be today. The customer name will be identical in the bill, Drive, GST RECORDS and UPCOMING BILLS.\nBasic amount: ' + money(amt) + '\nCGST 9%: ' + money(amt * 0.09) + '\nSGST 9%: ' + money(amt * 0.09) + '\nTotal: ' + money(amt + (Math.round(amt * 0.09 * 100) / 100) * 2) + '\nDuration: ' + m + ' month(s)\nMaharashtra tax configuration: fixed.')) return;
+    if (!confirm('Onboard ' + nm + '?\nGoogle Doc filename: ' + docName + '\n\nThe invoice date will be today. The customer name will be identical in the bill, Drive, GST RECORDS and UPCOMING BILLS.\nBasic amount: ' + money(amt) + '\nCGST 9%: ' + money(amt * 0.09) + '\nSGST 9%: ' + money(amt * 0.09) + '\nTotal: ' + money(amt + (Math.round(amt * 0.09 * 100) / 100) * 2) + '\nDuration: ' + m + ' month(s)\nMaharashtra tax configuration: fixed.')) return;
 
     busy(true, 'Creating customer from master template…');
     api('add_customer', {
       name: nm,
       sheet_name: nm,
-      doc_name: nm,
+      doc_name: docName,
       amount: amt,
       duration_months: m,
       period_start: start,
@@ -1713,6 +1727,13 @@ function renderSettings(body) {
     '<div class="small" id="s_template_status" role="status" aria-live="polite"></div>' +
     '</div>' +
 
+    '<div class="card"><div class="section-title" style="margin-top:0">Clean up a previously deleted customer</div>' +
+    '<div class="meta-line">Use this only for a customer that has been deleted and should never be restored. It first checks that no active UPCOMING BILLS or GST RECORDS rows exist. It then permanently removes matching Bin entries, orphaned mapped Google Docs, the customer PDF archive, document mappings and customer aliases.</div>' +
+    '<div class="field" style="margin-top:10px"><label for="s_cleanup_customer">Deleted customer name</label>' +
+    '<input id="s_cleanup_customer" value="Rithik Ahir" autocomplete="off"></div>' +
+    '<button class="btn" id="s_cleanup_run">Clean up deleted customer data</button>' +
+    '<div class="small" id="s_cleanup_status" role="status" aria-live="polite"></div></div>' +
+
     '<div class="card"><div class="section-title" style="margin-top:0">Data</div>' +
     '<div class="meta-line">' + cs + ' customers loaded' + (state.savedAt ? ' · ' + new Date(state.savedAt).toLocaleString() : '') + '</div>' +
     '<div class="btn-row"><button class="btn" id="s_refresh">Refresh now</button></div></div>' +
@@ -1731,6 +1752,27 @@ function renderSettings(body) {
       .catch(function (e) { busy(false); toast('Failed: ' + e.message, true); });
   };
   $('#s_reconf').onclick = function () { stack = [{ fn: renderSetup }]; renderTop(); };
+  $('#s_cleanup_run').onclick = function () {
+    var customer = $('#s_cleanup_customer').value.trim();
+    if (!customer) { toast('Enter the previously deleted customer name', true); return; }
+    if (!confirm('Permanently clean up "' + customer + '"?\n\nThis will permanently remove matching Bin entries, orphaned Google Docs and archived PDFs, plus all document mappings and customer aliases. It is allowed only when there are no active sheet records. This cleanup cannot be undone.')) return;
+    busy(true, 'Checking and cleaning deleted customer data…');
+    api('cleanup_deleted_customer', { customer: customer }).then(function (res) {
+      busy(false);
+      $('#s_cleanup_status').textContent =
+        'Cleanup complete. Removed ' + res.removed_doc_mappings +
+        ' document mappings and ' + res.removed_manual_doc_mappings +
+        ' manual mappings; permanently removed ' + res.purged_bin_entries +
+        ' Bin entries. You can now reuse this customer name.';
+      toast('Deleted customer data cleaned ✓');
+      refreshData(false);
+    }).catch(function (e) {
+      busy(false);
+      $('#s_cleanup_status').textContent = 'Cleanup did not run: ' + e.message;
+      toast('Cleanup failed: ' + e.message, true);
+    });
+  };
+
   $('#s_refresh').onclick = function () { refreshData(true); };
   $('#s_template_save').onclick = function () {
     var raw = $('#s_template_id').value.trim();
