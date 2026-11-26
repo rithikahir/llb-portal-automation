@@ -1727,13 +1727,6 @@ function renderSettings(body) {
     '<div class="small" id="s_template_status" role="status" aria-live="polite"></div>' +
     '</div>' +
 
-    '<div class="card"><div class="section-title" style="margin-top:0">Clean up a previously deleted customer</div>' +
-    '<div class="meta-line">Use this only for a customer that has been deleted and should never be restored. It first checks that no active UPCOMING BILLS or GST RECORDS rows exist. It then permanently removes matching Bin entries, orphaned mapped Google Docs, the customer PDF archive, document mappings and customer aliases.</div>' +
-    '<div class="field" style="margin-top:10px"><label for="s_cleanup_customer">Deleted customer name</label>' +
-    '<input id="s_cleanup_customer" value="Rithik Ahir" autocomplete="off"></div>' +
-    '<button class="btn" id="s_cleanup_run">Clean up deleted customer data</button>' +
-    '<div class="small" id="s_cleanup_status" role="status" aria-live="polite"></div></div>' +
-
     '<div class="card"><div class="section-title" style="margin-top:0">Data</div>' +
     '<div class="meta-line">' + cs + ' customers loaded' + (state.savedAt ? ' · ' + new Date(state.savedAt).toLocaleString() : '') + '</div>' +
     '<div class="btn-row"><button class="btn" id="s_refresh">Refresh now</button></div></div>' +
@@ -1752,27 +1745,6 @@ function renderSettings(body) {
       .catch(function (e) { busy(false); toast('Failed: ' + e.message, true); });
   };
   $('#s_reconf').onclick = function () { stack = [{ fn: renderSetup }]; renderTop(); };
-  $('#s_cleanup_run').onclick = function () {
-    var customer = $('#s_cleanup_customer').value.trim();
-    if (!customer) { toast('Enter the previously deleted customer name', true); return; }
-    if (!confirm('Permanently clean up "' + customer + '"?\n\nThis will permanently remove matching Bin entries, orphaned Google Docs and archived PDFs, plus all document mappings and customer aliases. It is allowed only when there are no active sheet records. This cleanup cannot be undone.')) return;
-    busy(true, 'Checking and cleaning deleted customer data…');
-    api('cleanup_deleted_customer', { customer: customer }).then(function (res) {
-      busy(false);
-      $('#s_cleanup_status').textContent =
-        'Cleanup complete. Removed ' + res.removed_doc_mappings +
-        ' document mappings and ' + res.removed_manual_doc_mappings +
-        ' manual mappings; permanently removed ' + res.purged_bin_entries +
-        ' Bin entries. You can now reuse this customer name.';
-      toast('Deleted customer data cleaned ✓');
-      refreshData(false);
-    }).catch(function (e) {
-      busy(false);
-      $('#s_cleanup_status').textContent = 'Cleanup did not run: ' + e.message;
-      toast('Cleanup failed: ' + e.message, true);
-    });
-  };
-
   $('#s_refresh').onclick = function () { refreshData(true); };
   $('#s_template_save').onclick = function () {
     var raw = $('#s_template_id').value.trim();
