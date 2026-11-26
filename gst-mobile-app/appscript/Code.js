@@ -1243,6 +1243,24 @@ function firstParentId_(driveItem) {
   return parents.next().getId();
 }
 
+/**
+ * DriveApp Folder has addFolder/removeFolder operations rather than File.moveTo.
+ * Reparent a customer archive folder while retaining its original file ID.
+ */
+function moveDriveFolder_(folderId, sourceParentId, destinationParent) {
+  var folder = DriveApp.getFolderById(folderId);
+  var source = DriveApp.getFolderById(sourceParentId);
+  source.removeFolder(folder);
+  try {
+    destinationParent.addFolder(folder);
+  } catch (err) {
+    // Restore the original parent if adding to the destination fails.
+    try { source.addFolder(folder); } catch (rollbackErr) {}
+    throw err;
+  }
+  return folder;
+}
+
 function moveBinDocsBack_(manifest, binDocsFolder) {
   var restored = [];
   (manifest.movedDocs || []).forEach(function (item) {
@@ -1449,7 +1467,7 @@ function deleteCustomer_(body) {
     });
 
     if (pdfFolderRecord) {
-      DriveApp.getFolderById(pdfFolderRecord.id).moveTo(pdfBin);
+      moveDriveFolder_(pdfFolderRecord.id, pdfFolderRecord.originalParentId, pdfBin);
       movedPdfFolder = true;
     }
     manifest.status = 'DRIVE_MOVED';
@@ -1487,7 +1505,10 @@ function deleteCustomer_(body) {
         try { DriveApp.getFileById(item.id).moveTo(DriveApp.getFolderById(item.originalParentId)); } catch (e1) {}
       });
       if (movedPdfFolder && manifest && manifest.pdfFolder) {
-        try { DriveApp.getFolderById(manifest.pdfFolder.id).moveTo(DriveApp.getFolderById(manifest.pdfFolder.originalParentId)); } catch (e2) {}
+        try {
+          moveDriveFolder_(manifest.pdfFolder.id, pdfBin.getId(),
+            DriveApp.getFolderById(manifest.pdfFolder.originalParentId));
+        } catch (e2) {}
       }
       if (manifest) {
         var dm = loadJsonProperty_('DOCS_MAP');
@@ -1611,8 +1632,8 @@ function restoreDeletedCustomer_(body) {
       movedBackDocs.push(item);
     });
     if (manifest.pdfFolder) {
-      DriveApp.getFolderById(manifest.pdfFolder.id)
-        .moveTo(DriveApp.getFolderById(manifest.pdfFolder.originalParentId));
+      moveDriveFolder_(manifest.pdfFolder.id, binPdfs.getId(),
+        DriveApp.getFolderById(manifest.pdfFolder.originalParentId));
       movedBackPdf = true;
     }
 
@@ -1656,7 +1677,10 @@ function restoreDeletedCustomer_(body) {
       });
     }
     if (movedBackPdf && binPdfs && binInfo && binInfo.manifest.pdfFolder) {
-      try { DriveApp.getFolderById(binInfo.manifest.pdfFolder.id).moveTo(binPdfs); } catch (e2) {}
+      try {
+        var currentParentId = firstParentId_(DriveApp.getFolderById(binInfo.manifest.pdfFolder.id));
+        moveDriveFolder_(binInfo.manifest.pdfFolder.id, currentParentId, binPdfs);
+      } catch (e2) {}
     }
     if (rowsRestored && binInfo) {
       try {
