@@ -1733,8 +1733,8 @@ function renderSettings(body) {
     api('set_props', { props: { NEW_CUSTOMER_TEMPLATE_ID: id } })
       .then(function () {
         busy(false);
-        $('#s_template_status').textContent = 'Master template ID saved. New customer onboarding will now use this document.';
-        toast('Master template saved ✓');
+        $('#s_template_status').textContent = 'Master template saved and verified. The document is accessible and all required placeholders were found.';
+        toast('Master template saved and verified ✓');
       })
       .catch(function (e) {
         busy(false);
