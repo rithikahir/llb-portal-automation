@@ -1077,7 +1077,7 @@ function renderBillEdit(app, params) {
         })() + '</select><div class="small">Changing the duration updates the service description and recalculates the bill period end.</div></div>' +
         '<div class="grid2">' +
         '<div class="field"><label>Bill period start</label><input id="e_pstart" type="date" value="' + esc(pf.period_start || '') + '"></div>' +
-        '<div class="field"><label>Bill period end</label><input id="e_pend" type="date" value="' + esc(pf.period_end || '') + '"></div>' +
+        '<div class="field"><label for="e_pend">Bill period end (automatic)</label><input id="e_pend" type="date" value="' + esc(pf.period_end || '') + '" readonly></div>' +
         '</div>' +
         '<div class="field"><label>Service description (exact PDF text)</label>' +
         '<textarea id="e_desc">' + esc(pf.desc || '') + '</textarea></div>' +
@@ -1104,6 +1104,7 @@ function renderBillEdit(app, params) {
       };
       editStartField.oninput = recalculateEditPeriodEnd_;
       editStartField.onchange = recalculateEditPeriodEnd_;
+      recalculateEditPeriodEnd_();
 
       $('#e_save').onclick = function () {
         var body = {
