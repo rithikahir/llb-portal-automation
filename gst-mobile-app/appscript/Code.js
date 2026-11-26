@@ -2197,8 +2197,7 @@ function invoiceDateTextInDoc_(docId) {
 function buyerNameInDoc_(docId) {
   var doc = DocumentApp.openById(docId);
   var roots = [doc.getBody(), doc.getHeader(), doc.getFooter()];
-  function cleanCandidate_(value) {    var v = String(value || '').replace(/\u00A0/g, ' ').trim();    if (!v || /^(GSTIN|GSTIN \/ UIN|State Name|SAC Code|Invoice Date|Invoice No)\b/i.test(v)) return '';
-    return v;
+  function cleanCandidate_(value) {    var v = String(value || '').replace(/\u00A0/g, ' ').trim();    if (!v || /^(GSTIN|GSTIN \/ UIN|State Name|SAC Code|Invoice Date|Invoice No)\b/i.test(v)) return '';    return v;
   }
 
   function fromCellText_(value) {
@@ -3238,6 +3237,9 @@ function editBill_(body) {
   try { addressOld = buyerAddressInDoc_(docId); } catch (addressReadError) { /* keep edit available */ }
   function normalizeAddressCompare_(value) {
     return String(value || '').replace(/\u00A0/g, ' ').replace(/\s+/g, ' ').trim().toLowerCase();
+  }
+  if (address && !addressOld) {
+    throw new Error('Could not read the existing buyer address from the Google Doc. The edit was stopped without changing the document, PDF or sheet.');
   }
   if (addressOld && address &&
       normalizeAddressCompare_(addressOld) !== normalizeAddressCompare_(address)) {
