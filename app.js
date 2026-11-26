@@ -1161,7 +1161,7 @@ function renderAddCustomer(app) {
   $('#a_name').oninput = function () {
     if (docNameField.dataset.auto === '1') {
       var firstNamePart = this.value.trim().split(/\s+/)[0] || '';
-      docNameField.value = firstNamePart ? 'BILL_' + firstNamePart : '';
+      docNameField.value = firstNamePart ? 'BILL_' + firstNamePart.toUpperCase() : '';
     }
   };
   var todayISO = function () {
