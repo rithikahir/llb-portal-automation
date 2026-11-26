@@ -435,7 +435,7 @@ function findLastGstRecord_(gstVals, name) {
     var d = asDate_(row[1]);
     if (!best || s > bestScore || (s === bestScore && d && bestDate && d > bestDate)) {
       best = { invoiceNo: inv, invoiceDate: d ? fmtShort_(d) : String(row[1] || '').trim(),
-               customer: String(row[2]).trim(), gstin: String(row[3] || '').trim(),
+               customer: String(row[2]).trim(), gstin: gstinDocumentValue_(row[3]),
                desc: String(row[4] || '').trim(), amount: row[5], cgst: row[6], sgst: row[7],
                total: row[8], mode: String(row[9] || '').trim() };
       bestScore = s; bestDate = d;
@@ -444,13 +444,24 @@ function findLastGstRecord_(gstVals, name) {
   return best;
 }
 
+/** Normalize optional GSTIN for invoice/document operations. */
+function gstinDocumentValue_(value) {
+  var text = String(value === null || value === undefined ? '' : value).trim();
+  return !text || text === '-' ? '' : text;
+}
+
+/** GST RECORDS uses a visible hyphen instead of a blank optional GSTIN. */
+function gstinSheetValue_(value) {
+  return gstinDocumentValue_(value) || '-';
+}
+
 function appendGstRecord_(gst, gCols, v) {
   var rowIdx = gst.getLastRow() + 1;
   var row = new Array(GST_COLUMNS.length).fill('');
   row[gCols['Invoice No']] = v.invoiceNo;
   row[gCols['Invoice Date']] = v.invoiceDate;
   row[gCols['Customer Name']] = v.customer;
-  row[gCols['Customer GSTIN']] = v.gstin;
+  row[gCols['Customer GSTIN']] = gstinSheetValue_(v.gstin);
   // Keep full wording on the Google Doc/PDF; store a compact label in GST RECORDS.
   row[gCols['Service Description']] = conciseServiceDescription_(v.desc) || v.desc;
   row[gCols['Amount ₹']] = v.amount;
@@ -1876,7 +1887,7 @@ function billEditPrefill_(body) {
   var dParsed = gCols['Invoice Date'] >= 0 ? asDate_(gstVals[row][gCols['Invoice Date']]) : null;
   var rec = {
     name: String(gstVals[row][gCols['Customer Name']] || '').trim(),
-    gstin: String(gstVals[row][gCols['Customer GSTIN']] || '').trim(),
+    gstin: gstinDocumentValue_(gstVals[row][gCols['Customer GSTIN']]),
     desc: String(gstVals[row][gCols['Service Description']] || '').trim(),
     amount: num_(gstVals[row][gCols['Amount ₹']]),
     date: dParsed ? iso_(dParsed) : ''
@@ -2035,7 +2046,7 @@ function editBill_(body) {
   var name = String(body.name || '').trim();
   var address = String(body.address || '').trim();
   var userid = String(body.userid || '').trim();
-  var gstin = String(body.gstin || '').trim();
+  var gstin = gstinDocumentValue_(body.gstin);
   // Existing bill edits preserve the invoice date selected in the edit form.
   // An edit must never silently replace the original date with today's date.
   var requestedDateText = String(body.invoice_date || '').trim();
@@ -2136,7 +2147,7 @@ function editBill_(body) {
           invoiceNo: docInvM[0],
           invoiceDateText: docDateM ? docDateM[1] : '',
           customer: docBuyerName || String(gstVals[r2][gCols['Customer Name']] || '').trim(),
-          gstin: String(gstVals[r2][gCols['Customer GSTIN']] || '').trim(),
+          gstin: gstinDocumentValue_(gstVals[r2][gCols['Customer GSTIN']]),
           amount: num_(gstVals[r2][gCols['Amount ₹']]),
           cgst: num_(gstVals[r2][gCols['CGST 9% (₹)']]),
           sgst: num_(gstVals[r2][gCols['SGST 9% (₹)']]),
@@ -2284,7 +2295,7 @@ function editBill_(body) {
   var gCustomerName = colOf_(gstNow[0], 'Customer Name');
   if (newInv !== inv && gInv >= 0)
     gst.getRange(rowNow + 1, gInv + 1).setValue(newInv);
-  if (gGstin >= 0) gst.getRange(rowNow + 1, gGstin + 1).setValue(gstin);
+  if (gGstin >= 0) gst.getRange(rowNow + 1, gGstin + 1).setValue(gstinSheetValue_(gstin));
   if (gDesc >= 0 && sheetDescription)
     gst.getRange(rowNow + 1, gDesc + 1).setValue(sheetDescription);
   if (gAmt >= 0) gst.getRange(rowNow + 1, gAmt + 1).setValue(amount);
@@ -2506,7 +2517,7 @@ function addCustomer_(body) {
   var mode = String(body.payment_mode || '').trim() || 'Cash';
   var address = String(body.address || '').trim();
   var userid = String(body.userid || '').trim();
-  var gstin = String(body.gstin || '').trim();
+  var gstin = gstinDocumentValue_(body.gstin);
   var seed = {
     buyer: name, address: address, gstin: gstin, userid: userid || '-',
     invoiceNo: invoiceNo, invoiceDate: fmtShort_(today),
