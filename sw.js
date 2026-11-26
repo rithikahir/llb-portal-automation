@@ -1,6 +1,6 @@
 /* GST Bill Manager — service worker (app shell cache) */
 'use strict';
-var CACHE = 'gst-bills-v27';
+var CACHE = 'gst-bills-v28';
 var ASSETS = [
   './',
   './index.html',
