@@ -1004,6 +1004,26 @@ function renderPaymentEdit(app, params) {
   };
 }
 
+
+function updateEditDescriptionDuration_(description, months) {
+  var text = String(description || '');
+  var monthLabel = months + (months === 1 ? ' Month' : ' Months');
+  var pattern = /\b\d+\s*months?\b/i;
+  if (pattern.test(text)) return text.replace(pattern, monthLabel);
+  if (/\bPLAN\b/i.test(text)) return text.replace(/\bPLAN\b/i, monthLabel + ' PLAN');
+  return text.replace(/\s+$/, '') + (text.trim() ? '\n' : '') + monthLabel + ' PLAN.';
+}
+
+function normalizeEditDescription_(description) {
+  return String(description || '')
+    .replace(/\r\n?/g, '\n')
+    .replace(/(?:\\+r\\+n|\\+n|\/n)/gi, '\n')
+    .split('\n')
+    .map(function (line) { return line.replace(/[ \t]+/g, ' ').trim(); })
+    .filter(Boolean)
+    .join('\n');
+}
+
 /* --------------------------------------------------------- bill editor --- */
 function renderBillEdit(app, params) {
   var c = params.c, inv = params.inv;
@@ -1030,7 +1050,7 @@ function renderBillEdit(app, params) {
         '<div class="card">' +
         '<div class="field"><label>Invoice no (fixed)</label><input id="e_inv" value="' + esc(inv.invoice_no) + '" disabled></div>' +
         '<div class="field"><label>Buyer name (printed on doc)</label><input id="e_name" value="' + esc(pf.name || c.name) + '"></div>' +
-        '<div class="field"><label>Address</label><input id="e_addr" value="' + esc(pf.address || '') + '"></div>' +
+        '<div class="field"><label for="e_addr">Address</label><textarea id="e_addr">' + esc(pf.address || '') + '</textarea></div>' +
         '<div class="card">' +
         '<div style="font-weight:700;margin-bottom:6px">Where should the updated buyer name be saved?</div>' +
         '<label style="display:flex;align-items:flex-start;gap:8px;padding:6px 0"><input id="e_update_gst_name" type="checkbox" style="width:18px;height:18px;margin-top:2px">' +
@@ -1045,6 +1065,16 @@ function renderBillEdit(app, params) {
         '</div>' +
         '<div class="field"><label>Invoice date (keep existing unless you want to change it)</label><input id="e_date" type="date" value="' + esc(pf.invoice_date || '') + '">' +
         '<div class="small">Loaded from ' + esc(pf.invoice_date_source || 'the existing invoice record') + '. Leave this date unchanged to preserve the original invoice date; choose another date only when you intend to change it.</div></div>' +
+        '<div class="field"><label for="e_months">Duration (months)</label><select id="e_months">' +
+        (function () {
+          var months = [1, 3, 6, 12];
+          var currentMonths = parseInt(pf.months, 10) || parseDurationText(pf.desc || pf.doc_desc || '') || 1;
+          if (months.indexOf(currentMonths) < 0) months.push(currentMonths);
+          months.sort(function (a, b) { return a - b; });
+          return months.map(function (m) {
+            return '<option value="' + m + '"' + (m === currentMonths ? ' selected' : '') + '>' + m + '</option>';
+          }).join('');
+        })() + '</select><div class="small">Changing the duration updates the service description and recalculates the bill period end.</div></div>' +
         '<div class="grid2">' +
         '<div class="field"><label>Bill period start</label><input id="e_pstart" type="date" value="' + esc(pf.period_start || '') + '"></div>' +
         '<div class="field"><label>Bill period end</label><input id="e_pend" type="date" value="' + esc(pf.period_end || '') + '"></div>' +
@@ -1055,6 +1085,25 @@ function renderBillEdit(app, params) {
         '<input id="e_amount" type="number" inputmode="decimal" step="0.01" min="0" value="' + esc(pf.amount || '') + '"></div>' +
         '</div>' +
         '<button class="btn primary" id="e_save">💾 Save edits &amp; regenerate PDF</button>';
+
+      var editMonthsField = $('#e_months');
+      var editStartField = $('#e_pstart');
+      var editEndField = $('#e_pend');
+      var editDescriptionField = $('#e_desc');
+
+      function recalculateEditPeriodEnd_() {
+        var months = parseInt(editMonthsField.value, 10) || 1;
+        var start = editStartField.value;
+        if (start) editEndField.value = periodEndISO(start, months);
+      }
+
+      editMonthsField.onchange = function () {
+        var months = parseInt(this.value, 10) || 1;
+        editDescriptionField.value = updateEditDescriptionDuration_(editDescriptionField.value, months);
+        recalculateEditPeriodEnd_();
+      };
+      editStartField.oninput = recalculateEditPeriodEnd_;
+      editStartField.onchange = recalculateEditPeriodEnd_;
 
       $('#e_save').onclick = function () {
         var body = {
@@ -1069,7 +1118,8 @@ function renderBillEdit(app, params) {
           invoice_date: $('#e_date').value,
           period_start: $('#e_pstart').value,
           period_end: $('#e_pend').value,
-          desc: $('#e_desc').value,
+          desc: normalizeEditDescription_($('#e_desc').value),
+          duration_months: parseInt($('#e_months').value, 10) || 1,
           amount: parseFloat($('#e_amount').value)
         };
         if (!(body.amount > 0)) { toast('Enter a valid amount', true); return; }
