@@ -3576,7 +3576,11 @@ function addCustomerLocked_(body) {
       var inactive = false;
       try {
         var mappedFile = DriveApp.getFileById(mappedId);
-        inactive = mappedFile.isTrashed() || isWithinCustomerBin_(mappedFile);
+        inactive = mappedFile.isTrashed();
+        if (isWithinCustomerBin_(mappedFile)) {
+          conflictingMapKeys.push(mappedName + ' (still in Bin; permanently clean up before reusing this name)');
+          return;
+        }
       } catch (missingMappedFile) {
         inactive = true;
       }
