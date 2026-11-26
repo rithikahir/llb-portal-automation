@@ -1118,50 +1118,40 @@ function renderAddCustomer(app) {
     '<div class="summary" id="sumbox"></div>' +
 
     '<div class="card">' +
-    '<div class="field"><label>Customer name (printed on doc) *</label>' +
-    '<input id="a_name" placeholder="e.g. Sharma Traders"></div>' +
-    '<div class="field"><label>Sheet record name (GST RECORDS "Customer Name")</label>' +
-    '<input id="a_sheetname" placeholder="same as doc name unless different" data-auto="1"></div>' +
-    '<div class="field"><label>Doc file name (in Drive)</label>' +
-    '<input id="a_docname" placeholder="same as doc name unless different" data-auto="1"></div>' +
-    '<div class="field"><label>Address * (printed below the name)</label>' +
-    '<textarea id="a_address" placeholder="Street, area, Pune - PIN"></textarea></div>' +
+    '<div class="field"><label>Customer name (used consistently on bill, sheet and Drive) *</label>' +
+    '<input id="a_name" placeholder="e.g. Sharma Traders" autocomplete="organization" required></div>' +
+    '<div class="field"><label>Address (printed below the name) *</label>' +
+    '<textarea id="a_address" placeholder="Street, area, Pune - PIN" required></textarea></div>' +
     '<div class="grid2">' +
     '<div class="field"><label>Plan amount (₹) *</label>' +
-    '<input id="a_amount" type="number" inputmode="decimal" step="0.01" min="0" placeholder="e.g. 500"></div>' +
+    '<input id="a_amount" type="number" inputmode="decimal" step="0.01" min="0.01" placeholder="e.g. 500" required></div>' +
     '<div class="field"><label>Duration (months) *</label><select id="a_months">' +
     [1, 3, 6, 12].map(function (m) {
       return '<option value="' + m + '"' + (m === 1 ? ' selected' : '') + '>' + m + '</option>';
     }).join('') + '</select></div>' +
     '</div>' +
     '<div class="field"><label>Bill period starts *</label>' +
-    '<input id="a_start" type="date"></div>' +
-    '<div class="field"><label>Plan description *</label>' +
-    '<textarea id="a_desc">HIGH SPEED 100 MBPS\nTRULY UNLIMITED 12 MONTHS PLAN.</textarea></div>' +
+    '<input id="a_start" type="date" required></div>' +
+    '<div class="field"><label>Plan description (each line appears in the Plan column) *</label>' +
+    '<textarea id="a_desc" required>HIGH SPEED 100 MBPS\nTRULY UNLIMITED 12 MONTHS PLAN.</textarea></div>' +
     '<div class="grid2">' +
-    '<div class="field"><label>GSTIN / UIN (optional — hidden if empty)</label><input id="a_gstin" placeholder="27ABCDE1234F1Z5"></div>' +
-    '<div class="field"><label>User id *</label><input id="a_userid" placeholder="e.g. SHARMA01"></div>' +
+    '<div class="field"><label>Customer GSTIN / UIN (optional)</label><input id="a_gstin" placeholder="27ABCDE1234F1Z5"></div>' +
+    '<div class="field"><label>User ID *</label><input id="a_userid" placeholder="e.g. SHARMA01" required></div>' +
     '</div>' +
     '<div class="field"><label>Payment mode</label><input id="a_mode" value="Online"></div>' +
     '</div>' +
 
-    '<div class="card"><div class="meta-line">📌 On confirm: invoice no is auto-assigned, the customer\'s <b>own Google Doc is created</b> (same layout as your other bills), the first bill PDF is archived on Drive under <b>BILLS/&lt;name&gt;</b>, a <b>GST RECORDS</b> row (Paid) is added, and the customer appears in <b>UPCOMING BILLS</b> with the new expiry.</div></div>' +
+    '<div class="card"><div class="meta-line"><b>Tax configuration — fixed for all customers</b><br>' +
+    'State: Maharashtra (27) · Place of supply: Maharashtra · CGST: 9% · SGST: 9%. ' +
+    'The business GSTIN, PAN, support contacts, bank details, stamp and terms are retained from the master invoice template.</div></div>' +
+
+    '<div class="card"><div class="meta-line">📌 On confirm: the app creates a new Google Doc from the configured master template, fills and verifies the customer details, generates the PDF from that verified Doc, archives it under <b>BILLS/&lt;customer&gt;</b>, then writes GST RECORDS and UPCOMING BILLS. The same customer name is used throughout.</div></div>' +
 
     '<button class="btn primary" id="doAdd">🧾 Create customer &amp; first bill</button>' +
     '<div style="height:20px"></div>' +
     '</div></div>';
 
   $('#bk').onclick = back;
-  // the two derived name fields mirror the doc name until edited by hand
-  ['#a_sheetname', '#a_docname'].forEach(function (sel) {
-    $(sel).oninput = function () { this.dataset.auto = '0'; };
-  });
-  $('#a_name').oninput = function () {
-    ['#a_sheetname', '#a_docname'].forEach(function (sel) {
-      var el = $(sel);
-      if (el.dataset.auto === '1') el.value = this.value;
-    }.bind(this));
-  };
   var todayISO = function () {
     var d = new Date();
     return d.getFullYear() + '-' + pad2(d.getMonth() + 1) + '-' + pad2(d.getDate());
@@ -1174,15 +1164,20 @@ function renderAddCustomer(app) {
     var p = new Date(+sParts[0], +sParts[1] - 1, +sParts[2]);
     var e = new Date(p); e.setMonth(e.getMonth() + m); e.setDate(e.getDate() - 1);
     function dmy(d) { return pad2(d.getDate()) + '/' + pad2(d.getMonth() + 1) + '/' + String(d.getFullYear()).slice(2); }
-    var cgst = Math.round(amt * 9) / 100, sgst = cgst, tot = Math.round((amt + cgst + sgst) * 100) / 100;
+    var cgst = Math.round(amt * 0.09 * 100) / 100;
+    var sgst = cgst;
+    var tot = Math.round((amt + cgst + sgst) * 100) / 100;
     $('#sumbox').innerHTML =
       '<div class="line"><span>Bill period</span><b>' + (amt > 0 ? dmy(p) + ' → ' + dmy(e) : '—') + '</b></div>' +
       '<div class="line"><span>Expiry</span><b>' + (amt > 0 ? dmy(e) : '—') + '</b></div>' +
-      '<div class="line"><span>Basic / CGST / SGST</span><b>' + money(amt) + ' / ' + money(cgst) + ' / ' + money(sgst) + '</b></div>' +
+      '<div class="line"><span>Basic / CGST 9% / SGST 9%</span><b>' + money(amt) + ' / ' + money(cgst) + ' / ' + money(sgst) + '</b></div>' +
       '<div class="line"><span>Invoice total</span><b class="big">' + money(tot) + '</b></div>' +
-      '<div class="line"><span>Invoice no</span><b>auto (next in FY)</b></div>';
+      '<div class="line"><span>Invoice number</span><b>Automatically assigned</b></div>';
   };
-  ['#a_months', '#a_amount'].forEach(function (s) { $(s).oninput = recalc; $(s).onchange = recalc; });
+  ['#a_months', '#a_amount', '#a_start'].forEach(function (sel) {
+    $(sel).oninput = recalc;
+    $(sel).onchange = recalc;
+  });
   recalc();
 
   $('#doAdd').onclick = function () {
@@ -1192,20 +1187,23 @@ function renderAddCustomer(app) {
     var ad = $('#a_address').value.trim();
     var uid = $('#a_userid').value.trim();
     var ds = $('#a_desc').value.trim();
+    var start = $('#a_start').value;
     if (!nm) { toast('Enter the customer name', true); return; }
-    if (!ad) { toast('Enter the address (printed below the name)', true); return; }
-    if (!uid) { toast('Enter the user id', true); return; }
+    if (!ad) { toast('Enter the address', true); return; }
+    if (!uid) { toast('Enter the User ID', true); return; }
     if (!ds) { toast('Enter the plan description', true); return; }
-    if (!(amt > 0)) { toast('Enter a valid amount', true); return; }
-    if (!confirm('Onboard ' + nm + '?\n\nFirst invoice: next number in FY\nAmount: ' + money(amt) + ' (+9% CGST + 9% SGST), ' + m + ' month(s)\nPeriod: ' + $('#a_start').value + ' → ' + ($('#a_months').value) + ' month(s)\n\nCreates their Google Doc, archives the PDF, and adds them to the sheet.')) return;
-    busy(true, 'Creating customer… making their doc…');
+    if (!(amt > 0) || !isFinite(amt)) { toast('Enter a valid plan amount', true); return; }
+    if (!start) { toast('Select the bill period start date', true); return; }
+    if (!confirm('Onboard ' + nm + '?\n\nThe invoice date will be today. The customer name will be identical in the bill, Drive, GST RECORDS and UPCOMING BILLS.\nBasic amount: ' + money(amt) + '\nCGST 9%: ' + money(amt * 0.09) + '\nSGST 9%: ' + money(amt * 0.09) + '\nTotal: ' + money(amt + (Math.round(amt * 0.09 * 100) / 100) * 2) + '\nDuration: ' + m + ' month(s)\nMaharashtra tax configuration: fixed.')) return;
+
+    busy(true, 'Creating customer from master template…');
     api('add_customer', {
       name: nm,
-      sheet_name: $('#a_sheetname').value.trim(),
-      doc_name: $('#a_docname').value.trim(),
+      sheet_name: nm,
+      doc_name: nm,
       amount: amt,
       duration_months: m,
-      period_start: $('#a_start').value,
+      period_start: start,
       description: ds,
       gstin: $('#a_gstin').value.trim(),
       userid: uid,
@@ -1693,6 +1691,15 @@ function renderSettings(body) {
     '<button class="btn" id="s_test">Test connection</button>' +
     '<button class="btn" id="s_reconf">Change</button></div></div>' +
 
+    '<div class="card"><div class="section-title" style="margin-top:0">Master invoice template</div>' +
+    '<div class="meta-line">Upload <b>MASTER_CUSTOMER_ONBOARDING_TEMPLATE.docx</b> to the same Google Drive account used by Apps Script. Open it with Google Docs and select <b>File → Save as Google Docs</b>. Then paste the new Google Doc URL or document ID below.</div>' +
+    '<div class="field" style="margin-top:10px"><label for="s_template_id">Master Google Doc URL or ID</label>' +
+    '<input id="s_template_id" type="text" autocomplete="off" placeholder="Paste Google Docs URL or document ID" aria-describedby="s_template_help"></div>' +
+    '<div class="small" id="s_template_help">The file must be a native Google Doc, not the original .docx. The master document is copied for each new customer; it is never edited directly.</div>' +
+    '<button class="btn primary" id="s_template_save">Save master template</button>' +
+    '<div class="small" id="s_template_status" role="status" aria-live="polite"></div>' +
+    '</div>' +
+
     '<div class="card"><div class="section-title" style="margin-top:0">Data</div>' +
     '<div class="meta-line">' + cs + ' customers loaded' + (state.savedAt ? ' · ' + new Date(state.savedAt).toLocaleString() : '') + '</div>' +
     '<div class="btn-row"><button class="btn" id="s_refresh">Refresh now</button></div></div>' +
@@ -1702,9 +1709,8 @@ function renderSettings(body) {
     '<div class="btn-row"><button class="btn primary hidden" id="s_install">📲 Install</button></div></div>' +
 
     '<div class="card"><div class="section-title" style="margin-top:0">About</div>' +
-    '<div class="meta-line">GST Bill Manager · bills are created by editing each customer\'s Google Doc and the PDF is archived on Drive under <b>BILLS/&lt;customer&gt;</b>. ' +
-    'Desktop billing (run_billing.py) keeps working as before.</div></div>' +
-    '<div style="height:20px"></div></div>';
+    '<div class="meta-line">GST Bill Manager · new customers are created from the master invoice template, then verified before the PDF and sheet records are finalized. Existing customer billing continues to update that customer’s own Google Doc. PDF files are archived on Drive under <b>BILLS/&lt;customer&gt;</b>.</div>' +
+    '</div><div style="height:20px"></div></div>';
 
   $('#s_test').onclick = function () {
     busy(true, 'Testing…');
@@ -1713,6 +1719,28 @@ function renderSettings(body) {
   };
   $('#s_reconf').onclick = function () { stack = [{ fn: renderSetup }]; renderTop(); };
   $('#s_refresh').onclick = function () { refreshData(true); };
+  $('#s_template_save').onclick = function () {
+    var raw = $('#s_template_id').value.trim();
+    if (!raw) { toast('Paste the master Google Doc URL or ID', true); return; }
+    var id = raw;
+    var match = raw.match(/\/document\/d\/([a-zA-Z0-9_-]+)/);
+    if (match) id = match[1];
+    if (!/^[a-zA-Z0-9_-]{20,}$/.test(id)) {
+      toast('This does not look like a Google Docs document ID', true);
+      return;
+    }
+    busy(true, 'Saving master template…');
+    api('set_props', { props: { NEW_CUSTOMER_TEMPLATE_ID: id } })
+      .then(function () {
+        busy(false);
+        $('#s_template_status').textContent = 'Master template ID saved. New customer onboarding will now use this document.';
+        toast('Master template saved ✓');
+      })
+      .catch(function (e) {
+        busy(false);
+        toast('Could not save template: ' + e.message, true);
+      });
+  };
   if (state.deferredInstall) {
     $('#s_install').className = 'btn primary';
     $('#s_install').onclick = function () {
