@@ -153,7 +153,7 @@ function setupSecrets() {
  */
 function setProps_(body) {
   var allowed = { SECRET: 1, SHEET_ID: 1, BILL_TEMPLATE_DOC_ID: 1,
-                  DOCS_FOLDER_ID: 1, PDFS_FOLDER_ID: 1 };
+                  DOCS_FOLDER_ID: 1, PDFS_FOLDER_ID: 1, NEW_CUSTOMER_TEMPLATE_ID: 1 };
   var set = [];
   var props = body.props || {};
   Object.keys(props).forEach(function (k) {
@@ -163,7 +163,7 @@ function setProps_(body) {
     PROPS.setProperty(k, v);
     set.push(k);
   });
-  if (!set.length) throw new Error('no valid properties to set (allowed: SECRET, SHEET_ID, BILL_TEMPLATE_DOC_ID, DOCS_FOLDER_ID, PDFS_FOLDER_ID)');
+  if (!set.length) throw new Error('no valid properties to set (allowed: SECRET, SHEET_ID, BILL_TEMPLATE_DOC_ID, DOCS_FOLDER_ID, PDFS_FOLDER_ID, NEW_CUSTOMER_TEMPLATE_ID)');
   if (set.indexOf('SECRET') >= 0) SECRET = PROPS.getProperty('SECRET');
   if (set.indexOf('SHEET_ID') >= 0) SHEET_ID = PROPS.getProperty('SHEET_ID');
   return { ok: true, set: set };
@@ -2321,10 +2321,15 @@ function exportAndArchive_(docId, custName, invoiceNo, dateStr, baselineHash) {
   blob.setName(fname);
   var file = folder.createFile(blob);
   if (!settled) {
-    enqueuePdfRefresh_({ fileId: file.getId(), docId: docId,
-                         fname: fname, baseline: baselineHash, attempts: 0 });
+    try {
+      enqueuePdfRefresh_({ fileId: file.getId(), docId: docId,
+                           fname: fname, baseline: baselineHash, attempts: 0 });
+    } catch (queueError) {
+      try { file.setTrashed(true); } catch (cleanupError) {}
+      throw queueError;
+    }
   }
-  return { blob: blob, file: fname, folderUrl: folder.getUrl(), pdf_settled: settled };
+  return { blob: blob, file: fname, fileId: file.getId(), folderUrl: folder.getUrl(), pdf_settled: settled };
 }
 
 /** Export a THROWAWAY COPY of the doc: a brand-new doc has no cached render,
@@ -3185,202 +3190,376 @@ function billViaCustomerDoc_(custName, last, oldExp, lastMonths, bill) {
  *  The sheet is written only after the doc + PDF succeeded; on any doc/parse
  *  failure the copy is trashed and nothing is saved. */
 function addCustomer_(body) {
-  var name = String(body.name || '').trim();          // buyer name printed ON THE DOC
-  if (!name) throw new Error('name is required');
-  // sheetName: the "Customer Name" recorded in GST RECORDS, used as the
-  // UPCOMING BILLS row and the doc-map key (defaults to the doc name).
-  // docName: the Google Doc FILE name (defaults to the doc name too).
-  var sheetName = String(body.sheet_name || '').trim() || name;
-  var docName = String(body.doc_name || '').trim() || sanitizeFile_(name);
+  var lock = LockService.getScriptLock();
+  if (!lock.tryLock(30000)) {
+    throw new Error('Another customer or billing operation is running. Please retry in a moment.');
+  }
+  try {
+    return addCustomerLocked_(body || {});
+  } finally {
+    lock.releaseLock();
+  }
+}
+
+
+/**
+ * Creates a new customer bill from the master Google Docs template.
+ * No existing customer's document is used as a source.
+ */
+function addCustomerLocked_(body) {
+  var name = String(body.name || '').trim();
+  if (!name) throw new Error('Customer name is required.');
+  var requestedSheetName = String(body.sheet_name || '').trim();
+  if (requestedSheetName && requestedSheetName.toLowerCase() !== name.toLowerCase()) {
+    throw new Error('For a mismatch-free onboarding, Customer Name, GST RECORDS name and UPCOMING BILLS name must be identical. Please use one customer name.');
+  }
+  var sheetName = name;
+  var docName = sanitizeFile_(name);
+  var address = String(body.address || '').replace(/\s*\r?\n\s*/g, ', ').trim();
+  var userid = String(body.userid || '').trim();
+  var amount = Number(body.amount);
   var months = parseInt(body.duration_months, 10);
-  if (!(months > 0)) months = 1;
-  var amount = parseFloat(body.amount);
-  if (!(amount > 0)) throw new Error('amount is required');
+  var desc = String(body.description || '').trim();
+  var mode = String(body.payment_mode || '').trim() || 'Cash';
+  var gstin = gstinDocumentValue_(body.gstin);
+
+  if (!address) throw new Error('Customer address is required.');
+  if (!userid) throw new Error('User ID is required.');
+  if (!isFinite(amount) || amount <= 0) throw new Error('Enter a valid plan amount greater than zero.');
+  if (!(months > 0)) throw new Error('Select a valid bill duration.');
+  if (!desc) throw new Error('Service description is required.');
+  if (!/^[\w\s.,#()/&+-]+$/.test(mode)) throw new Error('Payment mode contains unsupported characters.');
+
+  var templateId = String(PROPS.getProperty('NEW_CUSTOMER_TEMPLATE_ID') || '').trim();
+  if (!templateId) {
+    throw new Error('The master onboarding template is not configured. Upload MASTER_CUSTOMER_ONBOARDING_TEMPLATE.docx to Drive, convert it to Google Docs, then save its Google Doc ID in Settings.');
+  }
+  var templateFile;
+  try {
+    templateFile = DriveApp.getFileById(templateId);
+  } catch (templateError) {
+    throw new Error('The configured master template could not be opened. Check NEW_CUSTOMER_TEMPLATE_ID and confirm the Apps Script owner has access.');
+  }
+  if (templateFile.getMimeType() !== MimeType.GOOGLE_DOCS) {
+    throw new Error('The onboarding template must be a native Google Doc. Open the uploaded DOCX with Google Docs and use File → Save as Google Docs, then configure the new Google Doc ID.');
+  }
 
   var ss = SpreadsheetApp.openById(SHEET_ID);
   var up = ss.getSheetByName(UPCOMING_SHEET);
   var gst = ss.getSheetByName(GST_SHEET);
-  if (!up || !gst) throw new Error('tabs "' + UPCOMING_SHEET + '" / "' + GST_SHEET + '" not found');
-  var upVals = up.getDataRange().getValues();
-  var iName = colOf_(upVals[0], 'Customer name');
-  var iExp = colOf_(upVals[0], 'Expire Date');
-  if (iName < 0 || iExp < 0) throw new Error('UPCOMING BILLS needs "Customer name" and "Expire Date" columns');
-  var iSrNo = upcomingSrNoColumn_(upVals[0]);
-  if (iSrNo < 0)
-    throw new Error('UPCOMING BILLS needs an Sr No column (accepted headers: Sr No, Sr. No., S.No., Serial No)');
-  var iDur = colOf_(upVals[0], COL_DURATION);
-  var iAddr = colOf_(upVals[0], COL_ADDRESS);
-  var iUser = colOf_(upVals[0], COL_USERID);
+  if (!up || !gst) throw new Error('Tabs "' + UPCOMING_SHEET + '" / "' + GST_SHEET + '" were not found.');
 
+  var upVals = up.getDataRange().getValues();
+  var upHeaders = upVals[0] || [];
+  var iName = colOf_(upHeaders, 'Customer name');
+  var iExp = colOf_(upHeaders, 'Expire Date');
+  var iSrNo = upcomingSrNoColumn_(upHeaders);
+  var iDur = colOf_(upHeaders, COL_DURATION);
+  var iAddr = colOf_(upHeaders, COL_ADDRESS);
+  var iUser = colOf_(upHeaders, COL_USERID);
+  if (iName < 0 || iExp < 0) throw new Error('UPCOMING BILLS needs "Customer name" and "Expire Date" columns.');
+  if (iSrNo < 0) throw new Error('UPCOMING BILLS needs an Sr No column (accepted headers: Sr No, Sr. No., S.No., Serial No).');
+
+  var gstVals = gst.getDataRange().getValues();
+  var gHeaders = gstVals[0] || [];
+  var gCols = {};
+  GST_COLUMNS.forEach(function (colName) {
+    gCols[colName] = colOf_(gHeaders, colName);
+    if (gCols[colName] < 0) throw new Error('GST RECORDS is missing the "' + colName + '" column.');
+  });
+  var gstNameCol = colOf_(gHeaders, 'Customer Name');
+  var gstInvCol = colOf_(gHeaders, 'Invoice No');
+
+  // Reject duplicates across both active data sources and the document map.
   for (var r = 1; r < upVals.length; r++) {
     if (String(upVals[r][iName] || '').trim().toLowerCase() === sheetName.toLowerCase()) {
-      throw new Error('customer already exists in UPCOMING BILLS: ' + sheetName);
+      throw new Error('Customer already exists in UPCOMING BILLS: ' + sheetName);
+    }
+  }
+  for (var gr = 1; gr < gstVals.length; gr++) {
+    if (gstNameCol >= 0 &&
+        String(gstVals[gr][gstNameCol] || '').trim().toLowerCase() === sheetName.toLowerCase()) {
+      throw new Error('Customer already has an entry in GST RECORDS: ' + sheetName);
     }
   }
 
   var map;
-  try { map = JSON.parse(PROPS.getProperty('DOCS_MAP') || '{}'); } catch (e) { map = {}; }
-
-  // --- donor: a mapped customer whose doc + last record are complete enough
-  //     to drive the replacement (gstin, invoice no + date, amount, parseable
-  //     expiry + duration). Prefers one that also has address + user id.
-  var gstVals = gst.getDataRange().getValues();
-  var donor = null;
-  for (var c in map) {
-    var dLast = findLastGstRecord_(gstVals, c);
-    if (!dLast || !dLast.invoiceNo || !String(dLast.invoiceDate || '') ||
-        !(dLast.amount > 0) || !String(dLast.gstin || '')) continue;
-    var dRow = -1;
-    for (var rr = 1; rr < upVals.length; rr++) {
-      if (String(upVals[rr][iName] || '').trim().toLowerCase() === c.toLowerCase()) { dRow = rr; break; }
+  try { map = JSON.parse(PROPS.getProperty('DOCS_MAP') || '{}'); } catch (mapError) { map = {}; }
+  Object.keys(map).forEach(function (mappedName) {
+    if (mappedName.toLowerCase() === sheetName.toLowerCase() && map[mappedName]) {
+      throw new Error('A Google Doc is already mapped to this customer: ' + mappedName);
     }
-    if (dRow < 0) continue;
-    var dExp = asDate_(upVals[dRow][iExp]);
-    if (!dExp) continue;
-    var dMonths = parseDuration_(iDur >= 0 ? String(upVals[dRow][iDur] || '') : '');
-    if (!(dMonths > 0)) continue;
-    var dAddr = iAddr >= 0 ? String(upVals[dRow][iAddr] || '').trim() : '';
-    var dUser = iUser >= 0 ? String(upVals[dRow][iUser] || '').trim() : '';
-    var score = (dAddr ? 2 : 0) + (dUser ? 1 : 0);
-    if (!donor || score > donor.score) {
-      donor = { cust: String(c), last: dLast, exp: dExp, months: dMonths,
-                addr: dAddr, user: dUser, score: score };
+  });
+
+  // Keep the document filename aligned to the single customer name source.
+  var docsRoot = docsFolder_();
+  var sameNameFiles = docsRoot.getFilesByName(docName);
+  while (sameNameFiles.hasNext()) {
+    var existingFile = sameNameFiles.next();
+    if (existingFile.getMimeType() === MimeType.GOOGLE_DOCS) {
+      throw new Error('A Google Doc named "' + docName + '" already exists in the bills folder. Rename or reconcile the existing document before onboarding.');
     }
   }
-  if (!donor) throw new Error('no suitable donor doc — need one mapped customer whose GST record has gstin, invoice no + date, amount, and a parseable expiry + duration');
 
-  // --- the first bill (seed) -------------------------------------------------
+  // India-local invoice date; bill period start is the date selected by the user.
   var today = indiaToday_();
   var periodStart = today;
   var psRaw = String(body.period_start || '').trim();
-  if (/^\d{4}-\d{2}-\d{2}$/.test(psRaw)) {          // from <input type=date>
+  if (psRaw) {
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(psRaw)) throw new Error('Bill period start must be a valid date.');
     var q = psRaw.split('-');
     periodStart = new Date(Number(q[0]), Number(q[1]) - 1, Number(q[2]));
+    if (periodStart.getFullYear() !== Number(q[0]) ||
+        periodStart.getMonth() !== Number(q[1]) - 1 ||
+        periodStart.getDate() !== Number(q[2])) {
+      throw new Error('Bill period start is not a valid calendar date.');
+    }
   }
   var periodEnd = addDays_(addMonths_(periodStart, months), -1);
   var invoiceNo = nextInvoiceNo_(gstVals, today);
-  var cgst = round2_(amount * 0.09), sgst = round2_(amount * 0.09);
+  var cgst = round2_(amount * 0.09);
+  var sgst = round2_(amount * 0.09);
   var total = round2_(amount + cgst + sgst);
-  var desc = String(body.description || '').trim() || 'Broadband rental';
-  var mode = String(body.payment_mode || '').trim() || 'Cash';
-  var address = String(body.address || '').trim();
-  var userid = String(body.userid || '').trim();
-  var gstin = gstinDocumentValue_(body.gstin);
+  var invoiceDateDoc = fmtShort_(today).replace(/\//g, '-');
   var seed = {
-    buyer: name, address: address, gstin: gstin, userid: userid || '-',
-    invoiceNo: invoiceNo, invoiceDate: fmtShort_(today),
-    periodStart: fmtDMY_(periodStart), periodEnd: fmtDMY_(periodEnd),
-    desc: desc, amount: amount, cgst: cgst, sgst: sgst, total: total, mode: mode
+    buyer: name,
+    address: address,
+    gstin: gstin,
+    userid: userid,
+    invoiceNo: invoiceNo,
+    invoiceDate: invoiceDateDoc,
+    periodStart: fmtDMY_(periodStart),
+    periodEnd: fmtDMY_(periodEnd),
+    desc: desc,
+    amount: amount,
+    cgst: cgst,
+    sgst: sgst,
+    total: total,
+    mode: mode
   };
 
-  // --- create the doc: copy the donor's, replace donor values -> new ---------
-  var copyId = DriveApp.getFileById(map[donor.cust])
-    .makeCopy(docName, docsFolder_()).getId();
+  var copyId = '';
+  var archive = null;
+  var mapSaved = false;
   try {
-    Utilities.sleep(1500);                     // let the fresh copy settle
-    var docText = docText_(copyId);            // donor state, pre-edit
-    function locate_(needle) {                 // exact match first, then
-      needle = String(needle || '');           // case-insensitive slice
-      if (!needle) return '';
-      if (docText.indexOf(needle) >= 0) return needle;
-      var j = docText.toLowerCase().indexOf(needle.toLowerCase());
-      return j >= 0 ? docText.substr(j, needle.length) : '';
-    }
-    var pairs = docEditPairs_(donor.last, donor.exp, donor.months, seed);
-    pairs = pairs.filter(function (p) { return p.name !== 'Description'; });
-    var donorPrintedDate = invoiceDateTextInDoc_(copyId);
-    if (!donorPrintedDate) {
-      throw new Error('Invoice Date label/value could not be located in the donor Google Doc table.');
-    }
-    pairs.forEach(function (p) {
-      if (p.name === 'Invoice Date') {
-        p.old = donorPrintedDate;
-        p.nw = formatInvoiceDateLike_(seed.invoiceDate, donorPrintedDate);
-      }
-    });
-    var buyerOld = locate_(donor.last.customer);
-    if (buyerOld) pairs.push({ name: 'Buyer', old: buyerOld, nw: name });
-    var addrOld = locate_(donor.addr);
-    if (addrOld) pairs.push({ name: 'Address', old: addrOld, nw: address, warn: true });
-    var userOld = userIdInDoc_(copyId) || locate_(donor.user);
-    if (userOld && userOld !== (userid || '-'))
-      pairs.push({ name: 'User ID', old: userOld, nw: userid || '-', warn: true });
-    var gstinOld = locate_(donor.last.gstin);
-    if (gstinOld && gstin) {
-      // customer HAS a GSTIN — swap the value, label stays
-      pairs.push({ name: 'GSTIN', old: gstinOld, nw: gstin, warn: true });
-    } else if (gstinOld) {
-      // customer has NO GSTIN / UIN — remove the whole GSTIN line (label + value)
-      var gi = docText.indexOf(gstinOld);
-      var lineStart = docText.lastIndexOf('\n', gi);
-      var lineEnd = docText.indexOf('\n', gi);
-      if (lineEnd < 0) lineEnd = docText.length;
-      var line = docText.substring(lineStart + 1, lineEnd).trim();
-      if (/GSTIN/i.test(line)) {
-        pairs.push({ name: 'GSTIN line', old: line, nw: '', warn: true });
-      } else {
-        pairs.push({ name: 'GSTIN', old: gstinOld, nw: '', warn: true });
-      }
-    }
-    pairs.push({ name: 'Description', old: donor.last.desc, nw: desc, warn: true });
-    // fingerprint the fresh copy BEFORE the edit (same stale-render defence
-    // as the regular bill pipeline)
+    // Copy the blank master template, never another customer's live invoice.
+    copyId = templateFile.makeCopy(docName, docsRoot).getId();
+
     var baselineHash = null;
-    try { baselineHash = blobHash_(exportPdf_(copyId)); } catch (e) { /* optional */ }
-    var edit = editCustomerDoc_(copyId, pairs);
-    var newCustomerPrintedDate = invoiceDateTextInDoc_(copyId);
-    var expectedSeedDate = formatInvoiceDateLike_(seed.invoiceDate, donorPrintedDate);
-    if (newCustomerPrintedDate !== expectedSeedDate) {
-      throw new Error('Invoice Date verification failed on the new customer document. Expected ' +
-        expectedSeedDate + ', found ' + (newCustomerPrintedDate || '(not found)') + '.');
-    }
-    if (docText_(copyId).toLowerCase().indexOf(name.toLowerCase()) < 0) {
-      throw new Error('the buyer line could not be replaced — doc layout unexpected');
-    }
-    var arch = exportAndArchive_(copyId, name, invoiceNo,
-                                 String(seed.invoiceDate).replace(/\//g, '-'), baselineHash);
+    try { baselineHash = blobHash_(exportPdf_(copyId)); } catch (baselineError) { /* optional freshness baseline */ }
+
+    populateNewCustomerTemplate_(copyId, seed);
+    verifyNewCustomerTemplate_(copyId, seed);
+
+    // Archive into the same customer key used by both sheets and DOCS_MAP.
+    archive = exportAndArchive_(copyId, sheetName, invoiceNo,
+      String(fmtShort_(today)).replace(/\//g, '-'), baselineHash);
+    var pdfBase64 = Utilities.base64Encode(archive.blob.getBytes());
+
+    // Persist records only after the document and PDF have passed verification.
+    var firstGstRow = appendGstRecord_(gst, gCols, {
+      invoiceNo: invoiceNo,
+      invoiceDate: fmtShort_(today),
+      customer: sheetName,
+      gstin: gstin,
+      desc: desc,
+      amount: amount,
+      cgst: cgst,
+      sgst: sgst,
+      total: total,
+      mode: mode,
+      payment_status: 'Paid'
+    });
+    writeBillPeriod_(gst, ensureBillPeriodCol_(gst), firstGstRow - 1, periodStart, periodEnd);
+
+    var newRow = up.getLastRow() + 1;
+    up.getRange(newRow, iSrNo + 1).setValue(nextUpcomingSrNo_(up, iSrNo));
+    up.getRange(newRow, iName + 1).setValue(sheetName);
+    var expCell = up.getRange(newRow, iExp + 1);
+    expCell.setNumberFormat('dd/mm/yy');
+    expCell.setValue(periodEnd);
+    if (iDur >= 0) up.getRange(newRow, iDur + 1).setValue(durationText_(months));
+    if (address && iAddr >= 0) up.getRange(newRow, iAddr + 1).setValue(address);
+    if (userid && iUser >= 0) up.getRange(newRow, iUser + 1).setValue(userid);
+    sortUpcomingByExpire_(up, iExp);
+
+    map[sheetName] = copyId;
+    saveDocsMap_(map);
+    mapSaved = true;
+
+    return {
+      ok: true,
+      customer: sheetName,
+      doc_name: docName,
+      invoice_no: invoiceNo,
+      invoice_date: fmtShort_(today),
+      period: { start: fmtDMY_(periodStart), end: fmtDMY_(periodEnd) },
+      new_expire: fmtDMY_(periodEnd),
+      amount: amount,
+      cgst: cgst,
+      sgst: sgst,
+      total: total,
+      desc: desc,
+      mode: mode,
+      duration_months: months,
+      doc_id: copyId,
+      pdf_source: 'master-template (verified)',
+      pdf_file: archive.file,
+      pdf_folder: archive.folderUrl,
+      pdf_name: sanitizeFile_(sheetName) + '_BILL.pdf',
+      pdf_base64: pdfBase64
+    };
   } catch (err) {
-    try { DriveApp.getFileById(copyId).setTrashed(true); } catch (e2) { /* keep going */ }
-    throw new Error('doc creation failed — nothing was saved. ' +
+    // Best-effort rollback of any partially persisted state and created Drive assets.
+    if (mapSaved) {
+      try { delete map[sheetName]; saveDocsMap_(map); } catch (mapRollbackError) { Logger.log('Onboarding map rollback failed: ' + mapRollbackError); }
+    }
+    try { rollbackOnboardingRows_(gst, up, invoiceNo, sheetName); }
+    catch (rowRollbackError) { Logger.log('Onboarding sheet rollback failed: ' + rowRollbackError); }
+    if (archive && archive.fileId) {
+      try { DriveApp.getFileById(archive.fileId).setTrashed(true); } catch (pdfRollbackError) { Logger.log('Onboarding PDF cleanup failed: ' + pdfRollbackError); }
+    }
+    if (copyId) {
+      try { DriveApp.getFileById(copyId).setTrashed(true); } catch (docRollbackError) { Logger.log('Onboarding Doc cleanup failed: ' + docRollbackError); }
+    }
+    throw new Error('Customer onboarding did not complete. Any created bill, PDF and sheet rows were rolled back where possible. ' +
       String(err && err.message || err));
   }
+}
 
-  // --- doc + PDF safe -> sheet ------------------------------------------------
-  map[sheetName] = copyId;
-  saveDocsMap_(map);
-  var gCols = {};
-  GST_COLUMNS.forEach(function (cc) { gCols[cc] = colOf_(gstVals[0], cc); });
-  var firstRow = appendGstRecord_(gst, gCols, {
-    invoiceNo: invoiceNo, invoiceDate: fmtShort_(today), customer: sheetName,
-    gstin: gstin, desc: desc, amount: amount, cgst: cgst, sgst: sgst,
-    total: total, mode: mode, payment_status: 'Paid'
-  });
-  writeBillPeriod_(gst, ensureBillPeriodCol_(gst), firstRow - 1, periodStart, periodEnd);
 
-  var newRow = up.getLastRow() + 1;
-  up.getRange(newRow, iSrNo + 1).setValue(nextUpcomingSrNo_(up, iSrNo));
-  up.getRange(newRow, iName + 1).setValue(sheetName);
-  var expCell = up.getRange(newRow, iExp + 1);
-  expCell.setNumberFormat('dd/mm/yy');
-  expCell.setValue(periodEnd);
-  if (iDur >= 0) up.getRange(newRow, iDur + 1).setValue(durationText_(months));
-  if (address && iAddr >= 0) up.getRange(newRow, iAddr + 1).setValue(address);
-  if (userid && iUser >= 0) up.getRange(newRow, iUser + 1).setValue(userid);
-  sortUpcomingByExpire_(up, iExp);
-
-  return {
-    ok: true, customer: sheetName, doc_name: docName,
-    invoice_no: invoiceNo, invoice_date: fmtShort_(today),
-    period: { start: fmtDMY_(periodStart), end: fmtDMY_(periodEnd) },
-    new_expire: fmtDMY_(periodEnd),
-    amount: amount, cgst: cgst, sgst: sgst, total: total,
-    desc: desc, mode: mode, duration_months: months,
-    doc_id: copyId,
-    pdf_source: 'customer-doc (new customer)',
-    pdf_file: arch.file, pdf_folder: arch.folderUrl,
-    pdf_name: sanitizeFile_(sheetName) + '_BILL.pdf',
-    pdf_base64: Utilities.base64Encode(arch.blob.getBytes())
+/**
+ * Fills all required tokens in a fresh copy of the master invoice template.
+ */
+function populateNewCustomerTemplate_(docId, bill) {
+  var descriptionLines = String(bill.desc || '').split(/\r?\n/)
+    .map(function (line) { return line.replace(/\s+/g, ' ').trim(); })
+    .filter(function (line) { return !!line; });
+  var firstPlanLine = descriptionLines.length ? descriptionLines[0] : '';
+  var secondPlanLine = descriptionLines.length > 1 ? descriptionLines.slice(1).join(' ') : '';
+  var replacements = {
+    BUYER_NAME: bill.buyer,
+    BUYER_ADDRESS: bill.address,
+    BUYER_GSTIN_LINE: bill.gstin ? 'GSTIN / UIN : - ' + bill.gstin : '',
+    BUYER_STATE: 'Maharashtra',
+    BUYER_STATE_CODE: '27',
+    INVOICE_DATE: bill.invoiceDate,
+    INVOICE_NO: bill.invoiceNo,
+    USER_ID: bill.userid,
+    PLACE_OF_SUPPLY: 'MAHARASHTRA',
+    PLACE_STATE_CODE: '27',
+    BILL_PERIOD: bill.periodStart + ' to ' + bill.periodEnd,
+    PLAN_LINE_1: firstPlanLine,
+    PLAN_LINE_2: secondPlanLine,
+    CHARGES: money_(bill.amount),
+    LINE_AMOUNT: money_(bill.amount),
+    BASIC_AMOUNT: money_(bill.amount),
+    CGST_AMOUNT: money_(bill.cgst),
+    SGST_AMOUNT: money_(bill.sgst),
+    ROUND_OFF: money_(0),
+    TOTAL_AMOUNT: money_(bill.total),
+    AMOUNT_IN_WORDS: rupeeWords_(bill.total) + ' RUPEES ONLY/_'
   };
+
+  var before = docText_(docId);
+  var missingTokens = [];
+  Object.keys(replacements).forEach(function (key) {
+    if (before.indexOf('[[' + key + ']]') < 0) missingTokens.push('[[' + key + ']]');
+  });
+  if (missingTokens.length) {
+    throw new Error('The configured master template is missing required placeholders: ' + missingTokens.join(', '));
+  }
+
+  Object.keys(replacements).forEach(function (key) {
+    replaceTextInDoc_(docId, '[[' + key + ']]', String(replacements[key]));
+  });
+
+  var after = docText_(docId);
+  var leftovers = after.match(/\[\[[A-Z0-9_]+\]\]/g) || [];
+  if (leftovers.length) {
+    throw new Error('Template placeholders were not fully replaced: ' + leftovers.join(', '));
+  }
+}
+
+
+/**
+ * Verifies the actual populated Google Doc before its PDF is exported.
+ */
+function verifyNewCustomerTemplate_(docId, bill) {
+  var text = docText_(docId);
+  function normalized(value) {
+    return String(value === null || value === undefined ? '' : value)
+      .replace(/\u00a0/g, ' ').replace(/\s+/g, ' ').trim().toLowerCase();
+  }
+  function requireText(label, value) {
+    var expected = normalized(value);
+    if (expected && normalized(text).indexOf(expected) < 0) {
+      throw new Error('Template verification failed for ' + label + '. Expected value was not found in the Google Doc.');
+    }
+  }
+
+  var printedBuyer = buyerNameInDoc_(docId);
+  if (normalized(printedBuyer) !== normalized(bill.buyer)) {
+    throw new Error('Template verification failed for Buyer name. Expected "' + bill.buyer + '", found "' + (printedBuyer || '(blank)') + '".');
+  }
+  var printedUserId = userIdInDoc_(docId);
+  if (normalized(printedUserId) !== normalized(bill.userid)) {
+    throw new Error('Template verification failed for User ID. Expected "' + bill.userid + '", found "' + (printedUserId || '(blank)') + '".');
+  }
+  var printedDate = invoiceDateTextInDoc_(docId);
+  if (normalized(printedDate) !== normalized(bill.invoiceDate)) {
+    throw new Error('Template verification failed for Invoice Date. Expected "' + bill.invoiceDate + '", found "' + (printedDate || '(blank)') + '".');
+  }
+
+  requireText('Buyer address', bill.address);
+  if (bill.gstin) requireText('Buyer GSTIN / UIN', bill.gstin);
+  requireText('Invoice number', bill.invoiceNo);
+  requireText('Bill period', bill.periodStart + ' to ' + bill.periodEnd);
+  requireText('Plan description line 1', String(bill.desc).split(/\r?\n/).filter(Boolean)[0] || '');
+  var descLines = String(bill.desc).split(/\r?\n/).map(function (line) { return line.trim(); }).filter(Boolean);
+  if (descLines.length > 1) requireText('Plan description', descLines.slice(1).join(' '));
+  requireText('Basic amount', money_(bill.amount));
+  requireText('CGST amount', money_(bill.cgst));
+  requireText('SGST amount', money_(bill.sgst));
+  requireText('Invoice total', money_(bill.total));
+  requireText('Amount in words', rupeeWords_(bill.total) + ' RUPEES ONLY/_');
+  requireText('State name', 'Maharashtra');
+  requireText('State code', '27');
+  requireText('Place of supply', 'MAHARASHTRA');
+
+  return { ok: true, verified: true };
+}
+
+
+/**
+ * Remove only rows belonging to this newly reserved invoice/customer.
+ * Called only while the script lock is held.
+ */
+function rollbackOnboardingRows_(gst, up, invoiceNo, customer) {
+  if (gst && gst.getLastRow() > 1) {
+    var gv = gst.getDataRange().getValues();
+    var gi = colOf_(gv[0], 'Invoice No');
+    var gc = colOf_(gv[0], 'Customer Name');
+    if (gi >= 0 && gc >= 0) {
+      for (var r = gv.length - 1; r >= 1; r--) {
+        if (String(gv[r][gi] || '').trim() === String(invoiceNo) &&
+            String(gv[r][gc] || '').trim().toLowerCase() === String(customer).toLowerCase()) {
+          gst.deleteRow(r + 1);
+        }
+      }
+    }
+  }
+  if (up && up.getLastRow() > 1) {
+    var uv = up.getDataRange().getValues();
+    var ui = colOf_(uv[0], 'Customer name');
+    if (ui >= 0) {
+      for (var ur = uv.length - 1; ur >= 1; ur--) {
+        if (String(uv[ur][ui] || '').trim().toLowerCase() === String(customer).toLowerCase()) {
+          up.deleteRow(ur + 1);
+        }
+      }
+    }
+  }
 }
 
 /* --------------------------------------------------- doc health checks ---- */
