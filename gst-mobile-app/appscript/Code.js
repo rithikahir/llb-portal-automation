@@ -156,6 +156,14 @@ function setProps_(body) {
                   DOCS_FOLDER_ID: 1, PDFS_FOLDER_ID: 1, NEW_CUSTOMER_TEMPLATE_ID: 1 };
   var set = [];
   var props = body.props || {};
+
+  // Validate the new-customer template before storing it as the active template.
+  if (Object.prototype.hasOwnProperty.call(props, 'NEW_CUSTOMER_TEMPLATE_ID')) {
+    var candidateTemplateId = String(props.NEW_CUSTOMER_TEMPLATE_ID || '').trim();
+    if (!candidateTemplateId) throw new Error('NEW_CUSTOMER_TEMPLATE_ID cannot be blank.');
+    validateNewCustomerTemplate_(candidateTemplateId);
+  }
+
   Object.keys(props).forEach(function (k) {
     if (!allowed[k]) return;
     var v = String(props[k] || '').trim();
@@ -166,7 +174,48 @@ function setProps_(body) {
   if (!set.length) throw new Error('no valid properties to set (allowed: SECRET, SHEET_ID, BILL_TEMPLATE_DOC_ID, DOCS_FOLDER_ID, PDFS_FOLDER_ID, NEW_CUSTOMER_TEMPLATE_ID)');
   if (set.indexOf('SECRET') >= 0) SECRET = PROPS.getProperty('SECRET');
   if (set.indexOf('SHEET_ID') >= 0) SHEET_ID = PROPS.getProperty('SHEET_ID');
-  return { ok: true, set: set };
+  return { ok: true, set: set, template_validated: set.indexOf('NEW_CUSTOMER_TEMPLATE_ID') >= 0 };
+}
+
+
+/**
+ * Checks that the configured onboarding source is a readable native Google Doc
+ * containing the full placeholder contract required by addCustomerLocked_.
+ */
+function validateNewCustomerTemplate_(templateId) {
+  var file;
+  try {
+    file = DriveApp.getFileById(String(templateId || '').trim());
+  } catch (e) {
+    throw new Error('Cannot access the master template. Check the Google Doc ID and share the document with the Apps Script owner.');
+  }
+  if (file.getMimeType() !== MimeType.GOOGLE_DOCS) {
+    throw new Error('The master template must be a native Google Doc. Upload the DOCX, open it with Google Docs, then choose File → Save as Google Docs.');
+  }
+
+  var doc;
+  try {
+    doc = DocumentApp.openById(file.getId());
+  } catch (e2) {
+    throw new Error('The master template file is not readable as a Google Doc by the Apps Script owner.');
+  }
+  var docText = doc.getBody().getText();
+  var required = [
+    'BUYER_NAME', 'BUYER_ADDRESS', 'BUYER_GSTIN_LINE',
+    'BUYER_STATE', 'BUYER_STATE_CODE', 'INVOICE_DATE', 'INVOICE_NO',
+    'USER_ID', 'PLACE_OF_SUPPLY', 'PLACE_STATE_CODE', 'BILL_PERIOD',
+    'PLAN_LINE_1', 'PLAN_LINE_2', 'CHARGES', 'LINE_AMOUNT',
+    'BASIC_AMOUNT', 'CGST_AMOUNT', 'SGST_AMOUNT', 'ROUND_OFF',
+    'TOTAL_AMOUNT', 'AMOUNT_IN_WORDS'
+  ];
+  var missing = required.filter(function (key) {
+    return docText.indexOf('[[' + key + ']]') < 0;
+  });
+  if (missing.length) {
+    throw new Error('Master template is missing required placeholders: ' +
+      missing.map(function (key) { return '[[' + key + ']]'; }).join(', '));
+  }
+  return { valid: true, documentId: file.getId(), placeholders: required.length };
 }
 
 /** Editor-only preview: logs exactly what get_due would return (marks nothing). */
