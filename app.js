@@ -1133,7 +1133,7 @@ function renderAddCustomer(app) {
     '<div class="field"><label>Bill period starts *</label>' +
     '<input id="a_start" type="date" required></div>' +
     '<div class="field"><label>Plan description (each line appears in the Plan column) *</label>' +
-    '<textarea id="a_desc" required>HIGH SPEED 100 MBPS\nTRULY UNLIMITED 12 MONTHS PLAN.</textarea></div>' +
+    '<textarea id="a_desc" required data-auto="1">HIGH SPEED 100 MBPS\nTRULY UNLIMITED 1 MONTH PLAN.</textarea></div>' +
     '<div class="grid2">' +
     '<div class="field"><label>Customer GSTIN / UIN (optional)</label><input id="a_gstin" placeholder="27ABCDE1234F1Z5"></div>' +
     '<div class="field"><label>User ID *</label><input id="a_userid" placeholder="e.g. SHARMA01" required></div>' +
@@ -1177,7 +1177,17 @@ function renderAddCustomer(app) {
       '<div class="line"><span>Invoice total</span><b class="big">' + money(tot) + '</b></div>' +
       '<div class="line"><span>Invoice number</span><b>Automatically assigned</b></div>';
   };
-  ['#a_months', '#a_amount', '#a_start'].forEach(function (sel) {
+  var descField = $('#a_desc');
+  descField.oninput = function () { this.dataset.auto = '0'; };
+  $('#a_months').onchange = function () {
+    if (descField.dataset.auto === '1') {
+      var selectedMonths = parseInt(this.value, 10) || 1;
+      descField.value = 'HIGH SPEED 100 MBPS\\nTRULY UNLIMITED ' + selectedMonths +
+        (selectedMonths === 1 ? ' MONTH' : ' MONTHS') + ' PLAN.';
+    }
+    recalc();
+  };
+  ['#a_amount', '#a_start'].forEach(function (sel) {
     $(sel).oninput = recalc;
     $(sel).onchange = recalc;
   });
