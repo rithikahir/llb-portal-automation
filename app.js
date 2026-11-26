@@ -1160,9 +1160,12 @@ function renderAddCustomer(app) {
   var recalc = function () {
     var m = parseInt($('#a_months').value, 10) || 1;
     var amt = parseFloat($('#a_amount').value) || 0;
-    var sParts = ($('#a_start').value || todayISO()).split('-');
+    var startISO = $('#a_start').value || todayISO();
+    var sParts = startISO.split('-');
     var p = new Date(+sParts[0], +sParts[1] - 1, +sParts[2]);
-    var e = new Date(p); e.setMonth(e.getMonth() + m); e.setDate(e.getDate() - 1);
+    var endISO = periodEndISO(startISO, m);
+    var eParts = endISO.split('-');
+    var e = new Date(+eParts[0], +eParts[1] - 1, +eParts[2]);
     function dmy(d) { return pad2(d.getDate()) + '/' + pad2(d.getMonth() + 1) + '/' + String(d.getFullYear()).slice(2); }
     var cgst = Math.round(amt * 0.09 * 100) / 100;
     var sgst = cgst;
