@@ -1416,11 +1416,54 @@ function openPdfViewer(invoiceNo, presetB64, presetName) {
       var blob = b64ToBlob(b64);
       var name = p.presetName || (p.invoiceNo.replace(/[\\/]/g, '-') + '.pdf');
       $('#pdfarea').innerHTML =
+        '<div class="pdf-zoom-toolbar" role="group" aria-label="PDF zoom controls">' +
+        '<button class="pdf-zoom-btn" id="pdfZoomOut" type="button" aria-label="Zoom out" title="Zoom out">−</button>' +
+        '<span class="pdf-zoom-value" id="pdfZoomValue" aria-live="polite">100%</span>' +
+        '<button class="pdf-zoom-btn" id="pdfZoomIn" type="button" aria-label="Zoom in" title="Zoom in">+</button>' +
+        '<button class="pdf-zoom-fit" id="pdfZoomFit" type="button">Fit width</button></div>' +
         '<div class="wrap"><div class="pdf-pages" id="pages"></div></div>' +
         '<div class="pdf-actions">' +
         '<button class="btn" id="pshare">📤 Share</button>' +
         '<button class="btn primary" id="pdown">⬇️ Save to phone</button></div>';
-      renderPdfPages_(blob, $('#pages'));
+
+      var zoomLevel = 1;
+      var zoomBusy = false;
+      var pagesContainer = $('#pages');
+      var zoomOut = $('#pdfZoomOut'), zoomIn = $('#pdfZoomIn');
+      var zoomValue = $('#pdfZoomValue'), zoomFit = $('#pdfZoomFit');
+      function updateZoomControls_() {
+        zoomValue.textContent = Math.round(zoomLevel * 100) + '%';
+        zoomOut.disabled = zoomBusy || zoomLevel <= 0.75;
+        zoomIn.disabled = zoomBusy || zoomLevel >= 2.5;
+        zoomFit.disabled = zoomBusy || zoomLevel === 1;
+      }
+      function renderAtZoom_() {
+        if (zoomBusy) return;
+        zoomBusy = true;
+        updateZoomControls_();
+        renderPdfPages_(blob, pagesContainer, zoomLevel).then(function (pdfJsUsed) {
+          if (!pdfJsUsed) {
+            // Native browser PDF viewer has its own zoom controls.
+            $('.pdf-zoom-toolbar').classList.add('hidden');
+          }
+        }).catch(function (err) {
+          toast('Could not render PDF: ' + (err && err.message ? err.message : 'unknown error'), true);
+        }).finally(function () {
+          zoomBusy = false;
+          updateZoomControls_();
+        });
+      }
+      zoomOut.onclick = function () {
+        zoomLevel = Math.max(0.75, Math.round((zoomLevel - 0.25) * 100) / 100);
+        renderAtZoom_();
+      };
+      zoomIn.onclick = function () {
+        zoomLevel = Math.min(2.5, Math.round((zoomLevel + 0.25) * 100) / 100);
+        renderAtZoom_();
+      };
+      zoomFit.onclick = function () { zoomLevel = 1; renderAtZoom_(); };
+      renderAtZoom_();
+
       $('#pdown').onclick = function () { downloadBlob(blob, name); toast('Saved to Downloads ✓'); };
       $('#pshare').onclick = function () { shareBlob(blob, name); };
     }
@@ -1444,61 +1487,93 @@ function openPdfViewer(invoiceNo, presetB64, presetName) {
 
 /** Render PDF pages onto canvases (mobile Chrome can't show PDFs in iframes).
  *  Falls back to the old iframe if pdf.js didn't load (e.g. no CDN access). */
-function renderPdfPages_(blob, container) {
+function renderPdfPages_(blob, container, zoomFactor) {
+  var zoom = Math.max(0.75, Math.min(Number(zoomFactor) || 1, 2.5));
   container.innerHTML = '<div class="pdf-render-loading"><span class="loading-spinner" aria-hidden="true"></span>' +
-    '<div>Rendering PDF pages…</div></div>';
+    '<div>Rendering high-resolution PDF…</div></div>';
+
   if (!window.pdfjsLib) {
     container.innerHTML = '<iframe class="pdf-frame" src="' + URL.createObjectURL(blob) + '"></iframe>';
-    return;
+    return Promise.resolve(false);
   }
+
   pdfjsLib.GlobalWorkerOptions.workerSrc =
     'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
+
   var ab = blob.arrayBuffer ? blob.arrayBuffer() : new Promise(function (res, rej) {
     var fr = new FileReader();
-    fr.onload = function () { res(fr.result); }; fr.onerror = rej;
+    fr.onload = function () { res(fr.result); };
+    fr.onerror = rej;
     fr.readAsArrayBuffer(blob);
   });
-  ab.then(function (buf) { return pdfjsLib.getDocument({ data: buf }).promise; })
-    .then(function (pdf) {
-      container.innerHTML = '';
-      var n = Math.min(pdf.numPages, 6);           // bills are 1 page; cap anyway
-      var next = function (i) {
-        if (i > n) return Promise.resolve();
-        return pdf.getPage(i).then(function (page) {
-          // Keep the displayed page at the fitted CSS size, but render the
-          // backing canvas at device-pixel resolution. The previous renderer
-          // used CSS pixels for both, which blurred text on Retina/high-DPI
-          // phones and when the browser scaled the canvas.
-          var fit = (container.clientWidth || 320) / page.getViewport({ scale: 1 }).width;
-          var cssScale = Math.max(Math.min(fit, 2), 0.3);
-          var cssViewport = page.getViewport({ scale: cssScale });
-          var deviceScale = Math.max(1, Math.min(window.devicePixelRatio || 1, 3));
-          var renderViewport = page.getViewport({ scale: cssScale * deviceScale });
 
-          // Limit backing-store memory on unusually large screens/pages while
-          // preserving at least native-resolution rendering.
-          var pixelCount = renderViewport.width * renderViewport.height;
-          var maxPixels = 12000000;
-          if (pixelCount > maxPixels) {
-            deviceScale = Math.max(1, deviceScale * Math.sqrt(maxPixels / pixelCount));
-            renderViewport = page.getViewport({ scale: cssScale * deviceScale });
-          }
+  return ab.then(function (buf) {
+    return pdfjsLib.getDocument({
+      data: buf,
+      useSystemFonts: true,
+      isEvalSupported: false
+    }).promise;
+  }).then(function (pdf) {
+    container.innerHTML = '';
+    var pageCount = Math.min(pdf.numPages, 6);
 
-          var cv = document.createElement('canvas');
-          cv.className = 'pdf-canvas';
-          cv.width = Math.ceil(renderViewport.width);
-          cv.height = Math.ceil(renderViewport.height);
-          container.appendChild(cv);
-          var context = cv.getContext('2d', { alpha: false });
-          return page.render({ canvasContext: context, viewport: renderViewport })
-            .promise.then(function () { return next(i + 1); });
+    function renderPage_(pageNumber) {
+      if (pageNumber > pageCount) return Promise.resolve(true);
+      return pdf.getPage(pageNumber).then(function (page) {
+        var unitViewport = page.getViewport({ scale: 1 });
+        var fitScale = (container.clientWidth || 320) / unitViewport.width;
+        var cssScale = Math.max(0.3, Math.min(fitScale * zoom, 4));
+        var cssViewport = page.getViewport({ scale: cssScale });
+
+        // Supersample beyond the display's physical pixel ratio. The viewer
+        // keeps a high-resolution backing canvas and only scales it down for
+        // display, which reduces soft text edges and remains clearer when
+        // users zoom in. Clamp the factor and total pixels to protect mobile
+        // devices from excessive canvas memory use.
+        var pixelRatio = window.devicePixelRatio || 1;
+        var outputScale = Math.max(1.5, Math.min(pixelRatio * 1.5, 4.5));
+        var renderViewport = page.getViewport({ scale: cssScale * outputScale });
+        var pixelCount = renderViewport.width * renderViewport.height;
+        var maxPixels = 24000000;
+        if (pixelCount > maxPixels) {
+          outputScale = Math.max(1, outputScale * Math.sqrt(maxPixels / pixelCount));
+          renderViewport = page.getViewport({ scale: cssScale * outputScale });
+        }
+
+        var canvas = document.createElement('canvas');
+        canvas.className = 'pdf-canvas';
+        canvas.width = Math.ceil(renderViewport.width);
+        canvas.height = Math.ceil(renderViewport.height);
+        canvas.style.width = Math.ceil(cssViewport.width) + 'px';
+        canvas.style.height = Math.ceil(cssViewport.height) + 'px';
+        canvas.style.maxWidth = 'none';
+        canvas.style.flex = '0 0 auto';
+        container.appendChild(canvas);
+
+        var context = canvas.getContext('2d', { alpha: false });
+        if (context) {
+          context.imageSmoothingEnabled = true;
+          context.imageSmoothingQuality = 'high';
+        }
+        return page.render({
+          canvasContext: context,
+          viewport: renderViewport,
+          intent: 'display'
+        }).promise.then(function () {
+          return renderPage_(pageNumber + 1);
         });
-      };
-      return next(1);
-    })
-    .catch(function () {
-      container.innerHTML = '<iframe class="pdf-frame" src="' + URL.createObjectURL(blob) + '"></iframe>';
+      });
+    }
+
+    return renderPage_(1).then(function () {
+      return true;
     });
+  }).catch(function (error) {
+    // Keep the PDF accessible even if canvas rendering fails; the browser's
+    // native viewer provides its own zoom and text rendering.
+    container.innerHTML = '<iframe class="pdf-frame" src="' + URL.createObjectURL(blob) + '"></iframe>';
+    return false;
+  });
 }
 
 /* -------------------------------------------------------------- SETTINGS */
