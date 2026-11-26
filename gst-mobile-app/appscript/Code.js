@@ -2197,8 +2197,7 @@ function invoiceDateTextInDoc_(docId) {
 function buyerNameInDoc_(docId) {
   var doc = DocumentApp.openById(docId);
   var roots = [doc.getBody(), doc.getHeader(), doc.getFooter()];
-  function cleanCandidate_(value) {
-    var v = String(value || '').replace(/\u00A0/g, ' ').trim();
+  function cleanCandidate_(value) {    var v = String(value || '').replace(/\u00A0/g, ' ').trim();
     if (!v || /^(GSTIN|GSTIN \/ UIN|State Name|SAC Code|Invoice Date|Invoice No)\b/i.test(v)) return '';
     return v;
   }
@@ -2261,6 +2260,91 @@ function buyerNameInDoc_(docId) {
 }
 
 /** Preserve the separator used by the existing customer document. */
+/**
+ * Reads the address from the Buyer (Bill to) block in the main customer Doc.
+ * It intentionally does not depend on UPCOMING BILLS optional Address columns.
+ */
+function buyerAddressInDoc_(docId) {
+  var doc = DocumentApp.openById(docId);
+  var roots = [doc.getBody(), doc.getHeader(), doc.getFooter()];
+
+  function extractAddress_(value, includesBuyerLabel) {
+    var lines = String(value || '').replace(/\u00A0/g, ' ').split(/\r?\n/)
+      .map(function (line) { return line.replace(/\s+/g, ' ').trim(); })
+      .filter(Boolean);
+    if (!lines.length) return '';
+
+    if (includesBuyerLabel) {
+      var labelIndex = -1;
+      for (var i = 0; i < lines.length; i++) {
+        if (/Buyer\s*\(\s*Bill\s*to\s*\)/i.test(lines[i])) { labelIndex = i; break; }
+      }
+      if (labelIndex < 0) return '';
+      var sameLine = lines[labelIndex].replace(/.*Buyer\s*\(\s*Bill\s*to\s*\)\s*/i, '').trim();
+      lines = (sameLine ? [sameLine] : []).concat(lines.slice(labelIndex + 1));
+    }
+
+    // The first remaining line is the buyer name, not part of the address.
+    if (lines.length) lines.shift();
+    var addressLines = [];
+    for (var j = 0; j < lines.length; j++) {
+      var line = lines[j];
+      if (/^(GSTIN(?:\s*\/\s*UIN)?|State\s*Name|State\s*Code|User\s*id|Place\s*of\s*Supply|SAC\s*Code|Invoice\s*Date|Invoice\s*No|PAN|Mobile|Phone|E-?Mail)\b/i.test(line)) break;
+      line = line.replace(/^Address\s*[:\-]\s*/i, '').trim();
+      if (line) addressLines.push(line);
+    }
+    return addressLines.join('\n');
+  }
+
+  function scan_(element) {
+    if (!element || typeof element.getType !== 'function') return '';
+    if (element.getType() === DocumentApp.ElementType.TABLE) {
+      var table = element;
+      for (var r = 0; r < table.getNumRows(); r++) {
+        var row = table.getRow(r), cells = [];
+        for (var c = 0; c < row.getNumCells(); c++) cells.push(row.getCell(c));
+
+        for (var c0 = 0; c0 < cells.length; c0++) {
+          if (!/Buyer\s*\(\s*Bill\s*to\s*\)/i.test(cells[c0].getText())) continue;
+          var sameCell = extractAddress_(cells[c0].getText(), true);
+          if (sameCell) return sameCell;
+
+          for (var c1 = c0 + 1; c1 < cells.length; c1++) {
+            var adjacent = extractAddress_(cells[c1].getText(), false);
+            if (adjacent) return adjacent;
+          }
+          for (var r2 = r + 1; r2 < Math.min(table.getNumRows(), r + 4); r2++) {
+            var below = table.getRow(r2);
+            if (below.getNumCells() > c0) {
+              var belowValue = extractAddress_(below.getCell(c0).getText(), false);
+              if (belowValue) return belowValue;
+            }
+          }
+        }
+        for (var c2 = 0; c2 < cells.length; c2++) {
+          var nested = scan_(cells[c2]);
+          if (nested) return nested;
+        }
+      }
+      return '';
+    }
+    if (typeof element.getNumChildren === 'function') {
+      for (var i = 0; i < element.getNumChildren(); i++) {
+        var found = scan_(element.getChild(i));
+        if (found) return found;
+      }
+    }
+    return '';
+  }
+
+  for (var i0 = 0; i0 < roots.length; i0++) {
+    if (!roots[i0]) continue;
+    var result = scan_(roots[i0]);
+    if (result) return result;
+  }
+  return extractAddress_(docText_(docId), true);
+}
+
 function formatInvoiceDateLike_(date, sample) {
   var out = date instanceof Date ? fmtShort_(date) : String(date || '').trim();
   out = out.replace(/-/g, '/');
@@ -2310,33 +2394,47 @@ function replaceTextInDoc_(docId, oldText, newText) {
 
 /** Best-effort description replacement: whole string first, then line-wise. */
 function replaceDesc_(docId, oldDesc, newDesc) {
+  oldDesc = String(oldDesc || '').replace(/\r\n?/g, '\n').trim();
+  newDesc = String(newDesc || '').replace(/\r\n?/g, '\n').trim();
   if (!oldDesc || !newDesc || oldDesc === newDesc) return 'unchanged';
-  var text = docText_(docId);
-  if (text.indexOf(oldDesc) >= 0) {
-    replaceTextInDoc_(docId, oldDesc, newDesc);
-    return 'replaced';
-  }
+
   var oldLines = oldDesc.split('\n').map(function (s) { return s.trim(); }).filter(Boolean);
   var newLines = newDesc.split('\n').map(function (s) { return s.trim(); }).filter(Boolean);
-  if (!oldLines.length) return 'NOT FOUND — left unchanged';
-  if (oldLines.length === 1 && newLines.length > 1) {
-    // one paragraph in the doc, two-line description now — merge onto one line
-    if (text.indexOf(oldLines[0]) < 0) return 'NOT FOUND — left unchanged';
-    replaceTextInDoc_(docId, oldLines[0], newLines.join(' '));
-    return 'replaced (merged to one line)';
+  if (!oldLines.length || !newLines.length) return 'NOT FOUND — left unchanged';
+
+  var currentText = docText_(docId);
+  var replacements = [], misses = [];
+  for (var i = 0; i < oldLines.length; i++) {
+    var oldLine = oldLines[i];
+    var newLine = i < newLines.length ? newLines[i] : '';
+    if (i === oldLines.length - 1 && newLines.length > oldLines.length)
+      newLine = newLines.slice(i).join(' ');
+    if (oldLine === newLine) continue;
+    if (currentText.indexOf(oldLine) >= 0) {
+      replacements.push({ old: oldLine, nw: newLine });
+      currentText = currentText.replace(oldLine, newLine);
+    } else if (newLine && currentText.indexOf(newLine) >= 0) {
+      // Safe retry: this line is already updated.
+    } else {
+      misses.push(oldLine);
+    }
   }
-  var max = Math.max(oldLines.length, newLines.length);
-  var misses = [];
-  for (var i = 0; i < max; i++) {
-    var o = i < oldLines.length ? oldLines[i] : null;
-    var w = i < newLines.length ? newLines[i] : '';
-    if (o === null) continue;                       // extra new lines have no anchor
-    if (o === w) continue;
-    if (text.indexOf(o) < 0) { misses.push(o); continue; }
-    replaceTextInDoc_(docId, o, w);
+  if (misses.length) {
+    throw new Error('Could not find the previous description/address line(s) in the Google Doc: ' +
+      misses.join(' | ') + '. No PDF or sheet update was completed.');
   }
-  return misses.length ? 'partially replaced, not found: ' + misses.join(' | ')
-                       : 'replaced (line-wise)';
+
+  replacements.forEach(function (pair) { replaceTextInDoc_(docId, pair.old, pair.nw); });
+  var after = docText_(docId);
+  var expectedLines = newLines.length > oldLines.length
+    ? [newLines.slice(oldLines.length - 1).join(' ')]
+    : newLines;
+  var absent = expectedLines.filter(function (line) { return line && after.indexOf(line) < 0; });
+  if (absent.length) {
+    throw new Error('The updated description/address could not be verified in the Google Doc: ' +
+      absent.join(' | ') + '. PDF and sheet were not updated.');
+  }
+  return 'replaced (verified line-wise)';
 }
 
 /** Applies old->new pairs to the customer doc IN PLACE, with verification.
@@ -2355,7 +2453,7 @@ function editCustomerDoc_(docId, pairs) {
   var applied = [], skipped = [], missing = [];
 
   pairs.forEach(function (p) {
-    if (p.name === 'Description') return;           // handled separately below
+    if (p.name === 'Description' || p.name === 'Address') return; // multi-paragraph blocks handled below
     if (!p.old || p.old === p.nw) { skipped.push(p.name + ' (unchanged)'); return; }
     if (before.indexOf(p.old) >= 0) applied.push(p);
     else if (before.indexOf(p.nw) >= 0) skipped.push(p.name + ' (already updated)');
@@ -2383,6 +2481,9 @@ function editCustomerDoc_(docId, pairs) {
   var descPair = pairs.filter(function (p) { return p.name === 'Description'; })[0];
   var descResult = '';
   if (descPair) descResult = replaceDesc_(docId, descPair.old, descPair.nw);
+  var addressPair = pairs.filter(function (p) { return p.name === 'Address'; })[0];
+  var addressResult = '';
+  if (addressPair) addressResult = replaceDesc_(docId, addressPair.old, addressPair.nw);
 
   var after = docText_(docId);
   var failures = applied.filter(function (p) { return after.indexOf(p.nw) < 0; });
@@ -2820,6 +2921,17 @@ function billEditPrefill_(body) {
   var docText = '';
   try { if (docId) docText = docText_(docId); } catch (e) { /* ignore */ }
   var isLatest = !!docText && docText.indexOf(inv) >= 0;
+  var docAddress = '';
+  if (docId) {
+    try { docAddress = buyerAddressInDoc_(docId); } catch (addressReadErr) { /* retain legacy sheet fallback */ }
+  }
+  if (docAddress) address = docAddress;
+
+  var currentDocDescription = docDescBlock_(docText);
+  var invoiceDescription = (isLatest && currentDocDescription) ? currentDocDescription : rec.desc;
+  var descriptionMonths = parseDuration_(invoiceDescription);
+  if (descriptionMonths > 0) months = descriptionMonths;
+
   var prefillBuyerName = rec.name;
   var prefillUserId = userid;
   if (isLatest && docId) {
@@ -2877,7 +2989,7 @@ function billEditPrefill_(body) {
     name: prefillBuyerName, gstin: rec.gstin, userid: prefillUserId, address: address,
     invoice_date: invoiceDate, invoice_date_source: invoiceDateSource,
     amount: rec.amount,
-    desc: (isLatest && docDescBlock_(docText)) ? docDescBlock_(docText) : rec.desc,
+    desc: invoiceDescription, doc_desc: currentDocDescription,
     doc_desc: docDescBlock_(docText),
     period_start: ps || '', period_end: pe || '', months: months
   };
@@ -2946,7 +3058,10 @@ function editBill_(body) {
   if (!(amount > 0)) throw new Error('amount is required');
   var cgst = round2_(amount * 0.09), sgst = round2_(amount * 0.09);
   var total = round2_(amount + cgst + sgst);
-  var desc = String(body.desc || '').trim();
+  var desc = String(body.desc || '')
+    .replace(/\r\n?/g, '\n')
+    .replace(/(?:\\+r\\+n|\\+n|\/n)/gi, '\n')
+    .split('\n').map(function (line) { return line.trim(); }).filter(Boolean).join('\n');
   var name = String(body.name || '').trim();
   var address = String(body.address || '').trim();
   var userid = String(body.userid || '').trim();
@@ -3113,27 +3228,33 @@ function editBill_(body) {
   if (buyerOld && name && buyerOld !== name) pairs.push({ name: 'Buyer', old: buyerOld, nw: name, warn: true });
   var gstinOld = locate_(docRow.gstin);
   if (gstinOld && gstin && gstinOld !== gstin) pairs.push({ name: 'GSTIN', old: gstinOld, nw: gstin, warn: true });
-  if (address || userid) {
+  // Address is read from the main customer Doc, not optional sheet columns.
+  var addressOld = '';
+  try { addressOld = buyerAddressInDoc_(docId); } catch (addressReadError) { /* keep edit available */ }
+  function normalizeAddressCompare_(value) {
+    return String(value || '').replace(/\u00A0/g, ' ').replace(/\s+/g, ' ').trim().toLowerCase();
+  }
+  if (addressOld && address &&
+      normalizeAddressCompare_(addressOld) !== normalizeAddressCompare_(address)) {
+    pairs.push({ name: 'Address', old: addressOld, nw: address, warn: true });
+  }
+
+  // Preserve existing User ID behavior, including legacy sheet fallback.
+  var userOld = userIdInDoc_(docId);
+  if (!userOld && userid) {
     var upVals = up.getDataRange().getValues();
     var iName = colOf_(upVals[0], 'Customer name');
-    var iAddr = colOf_(upVals[0], COL_ADDRESS), iUser = colOf_(upVals[0], COL_USERID);
+    var iUser = colOf_(upVals[0], COL_USERID);
     var upRow = -1, best = 0;
     for (var r3 = 1; r3 < upVals.length; r3++) {
       var sc = nameScore_(cust, String(upVals[r3][iName] || ''));
       if (sc > best) { best = sc; upRow = r3; }
     }
-    if (upRow >= 0) {
-      var addrOld = iAddr >= 0 ? locate_(String(upVals[upRow][iAddr] || '').trim()) : '';
-      if (addrOld && address && addrOld !== address) pairs.push({ name: 'Address', old: addrOld, nw: address, warn: true });
-      // For latest bills this anchor updates the live Doc; for older bills
-      // editCustomerDoc_ applies it only to the throwaway PDF-generation copy.
-      var userOld = userIdInDoc_(docId);
-      if (!userOld && iUser >= 0)
-        userOld = locate_(String(upVals[upRow][iUser] || '').trim());
-      if (userOld && userid && userOld !== userid)
-        pairs.push({ name: 'User ID', old: userOld, nw: userid, warn: true });
-    }
+    if (upRow >= 0 && iUser >= 0)
+      userOld = locate_(String(upVals[upRow][iUser] || '').trim());
   }
+  if (userOld && userid && userOld !== userid)
+    pairs.push({ name: 'User ID', old: userOld, nw: userid, warn: true });
 
   // --- 5. render the edited bill's PDF --------------------------------------
   // LATEST bill: edit the real doc in place, then export via copy-trick.
@@ -4698,5 +4819,4 @@ function rupeeWords_(n) {
   if (rest) parts.push(three(rest));
   return parts.join(' ').replace(/\s+/g, ' ').trim();
 }
-
 
