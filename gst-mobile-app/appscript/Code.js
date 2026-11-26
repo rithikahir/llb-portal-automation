@@ -1140,6 +1140,60 @@ function rememberCustomerRenameAliases_(oldNames, newName, docId, canonicalGstNa
  * Existing mapped Docs and archived PDF folders are sent to Drive trash;
  * mapping and alias metadata are removed so the customer name can be reused.
  */
+/**
+ * Returns all item IDs in a Drive folder tree, including the root folder.
+ */
+function collectDriveTreeIds_(folder) {
+  var ids = {};
+  if (!folder) return ids;
+  ids[folder.getId()] = true;
+  var files = folder.getFiles();
+  while (files.hasNext()) ids[files.next().getId()] = true;
+  var folders = folder.getFolders();
+  while (folders.hasNext()) {
+    var childIds = collectDriveTreeIds_(folders.next());
+    Object.keys(childIds).forEach(function (id) { ids[id] = true; });
+  }
+  return ids;
+}
+
+
+/**
+ * Checks every ancestor folder, not only the immediate parent: Bin entries
+ * contain a "Google Docs" subfolder below BIN.
+ */
+function isWithinCustomerBin_(file) {
+  var queue = [], visited = {};
+  var parents = file.getParents();
+  while (parents.hasNext()) queue.push(parents.next());
+  while (queue.length) {
+    var folder = queue.shift(), id = folder.getId();
+    if (visited[id]) continue;
+    visited[id] = true;
+    if (String(folder.getName() || '').toUpperCase() === 'BIN') return true;
+    var ancestors = folder.getParents();
+    while (ancestors.hasNext()) queue.push(ancestors.next());
+  }
+  return false;
+}
+
+
+/**
+ * Drops queued PDF refreshes whose source Doc or archived PDF belongs to
+ * files being permanently removed. Unrelated customers' jobs are preserved.
+ */
+function clearPdfRefreshQueueForIds_(ids) {
+  var queue = [];
+  try { queue = JSON.parse(PROPS.getProperty('PDF_REFRESH_Q') || '[]'); } catch (e) { queue = []; }
+  if (!Array.isArray(queue)) queue = [];
+  var remaining = queue.filter(function (item) {
+    return !(ids && (ids[String(item.docId || '')] || ids[String(item.fileId || '')]));
+  });
+  PROPS.setProperty('PDF_REFRESH_Q', JSON.stringify(remaining));
+  return queue.length - remaining.length;
+}
+
+
 function cleanupDeletedCustomer_(body) {
   var customer = String(body.customer || '').trim();
   if (!customer) throw new Error('Enter the name of the previously deleted customer.');
@@ -1159,14 +1213,10 @@ function cleanupDeletedCustomer_(body) {
     var gstNameCol = colOf_(gstVals[0], 'Customer Name');
     var activeUpcoming = [], activeGst = [];
     for (var u = 1; u < upVals.length; u++) {
-      if (upNameCol >= 0 && identity.matches(upVals[u][upNameCol])) {
-        activeUpcoming.push(String(upVals[u][upNameCol] || ''));
-      }
+      if (upNameCol >= 0 && identity.matches(upVals[u][upNameCol])) activeUpcoming.push(String(upVals[u][upNameCol] || ''));
     }
     for (var g = 1; g < gstVals.length; g++) {
-      if (gstNameCol >= 0 && identity.matches(gstVals[g][gstNameCol])) {
-        activeGst.push(String(gstVals[g][gstNameCol] || ''));
-      }
+      if (gstNameCol >= 0 && identity.matches(gstVals[g][gstNameCol])) activeGst.push(String(gstVals[g][gstNameCol] || ''));
     }
     if (activeUpcoming.length || activeGst.length) {
       throw new Error('Cleanup blocked because active records still exist. UPCOMING BILLS: ' +
@@ -1174,41 +1224,61 @@ function cleanupDeletedCustomer_(body) {
         '. Delete or reconcile those records first.');
     }
 
+    // Find and permanently remove Bin entries for this already-deleted identity.
+    var binRoot = customerBinFolder_(false);
+    var purgedBinEntries = 0;
+    var affectedIds = {};
+    if (binRoot) {
+      var binFolders = binRoot.getFolders(), matchingBins = [];
+      while (binFolders.hasNext()) {
+        var binFolder = binFolders.next();
+        try {
+          var binManifest = readBinManifest_(binFolder).data;
+          if (binManifest.status === 'DELETED' && identity.matches(binManifest.customer)) {
+            matchingBins.push(binFolder);
+          }
+        } catch (ignoreInvalidBinEntry) {}
+      }
+      matchingBins.forEach(function (binFolder) {
+        var ids = collectDriveTreeIds_(binFolder);
+        Object.keys(ids).forEach(function (id) { affectedIds[id] = true; });
+        permanentlyDeleteDriveTree_(binFolder);
+        purgedBinEntries++;
+      });
+    }
+
     var docsMap = loadJsonProperty_('DOCS_MAP');
     var manualMap = loadManualMap_();
-    var docIds = {};
-    function collectEntries_(currentMap) {
-      var entries = {};
+    var docEntries = {}, manualEntries = {};
+    function collectEntries_(currentMap, entries) {
       Object.keys(currentMap).forEach(function (key) {
         var id = String(currentMap[key] || '');
         if (identity.matches(key)) {
           entries[key] = currentMap[key];
-          if (id) docIds[id] = true;
+          if (id) affectedIds[id] = true;
         }
       });
-      return entries;
     }
-    var docEntries = collectEntries_(docsMap);
-    var manualEntries = collectEntries_(manualMap);
+    collectEntries_(docsMap, docEntries);
+    collectEntries_(manualMap, manualEntries);
 
-    // Remove stale Docs associated with this deleted identity from the active
-    // source folder by sending them to Drive trash. Do not touch unrelated Docs.
+    // Remove any remaining mapped orphan Docs, but never select unrelated files.
     var trashedDocs = [];
-    Object.keys(docIds).forEach(function (id) {
+    Object.keys(affectedIds).forEach(function (id) {
       try {
         var file = DriveApp.getFileById(id);
         if (!file.isTrashed() && file.getMimeType() === MimeType.GOOGLE_DOCS) {
           file.setTrashed(true);
           trashedDocs.push(id);
         }
-      } catch (missingFile) {
-        // A permanently removed Drive file is already clean.
-      }
+      } catch (missingFile) {}
     });
 
     var pdfFolder = customerFolder_(customer, false);
     var trashedPdfFolder = false;
     if (pdfFolder) {
+      var pdfIds = collectDriveTreeIds_(pdfFolder);
+      Object.keys(pdfIds).forEach(function (id) { affectedIds[id] = true; });
       pdfFolder.setTrashed(true);
       trashedPdfFolder = true;
     }
@@ -1217,10 +1287,11 @@ function cleanupDeletedCustomer_(body) {
     Object.keys(manualEntries).forEach(function (key) { delete manualMap[key]; });
     saveDocsMap_(docsMap);
     saveManualMap_(manualMap);
+    clearPdfRefreshQueueForIds_(affectedIds);
 
     var folderAliases = loadCustomerFolderAliases_();
     Object.keys(folderAliases).forEach(function (key) {
-      if (identity.matches(key)) delete folderAliases[key];
+      if (identity.matches(key) || identity.matches(folderAliases[key])) delete folderAliases[key];
     });
     PROPS.setProperty('CUSTOMER_FOLDER_ALIASES', JSON.stringify(folderAliases));
 
@@ -1234,10 +1305,12 @@ function cleanupDeletedCustomer_(body) {
     return {
       ok: true,
       customer: customer,
+      purged_bin_entries: purgedBinEntries,
       removed_doc_mappings: Object.keys(docEntries).length,
       removed_manual_doc_mappings: Object.keys(manualEntries).length,
       trashed_orphan_docs: trashedDocs.length,
       trashed_pdf_folder: trashedPdfFolder,
+      cleared_pdf_refresh_jobs: true,
       active_upcoming_rows: 0,
       active_gst_rows: 0
     };
@@ -1971,6 +2044,11 @@ function purgeDeletedCustomer_(body) {
       if (item && item.id) mappedIds[String(item.id)] = true;
     });
 
+    // Capture every item in the Bin tree so queued PDF refresh jobs can be
+    // removed after the Drive API permanently deletes the files.
+    var deletedDriveIds = collectDriveTreeIds_(info.folder);
+    Object.keys(mappedIds).forEach(function (id) { deletedDriveIds[id] = true; });
+
     // First remove the Drive tree. If the API reports a failure, keep all
     // mapping and alias metadata intact so the customer can still be restored.
     permanentlyDeleteDriveTree_(info.folder);
@@ -1989,6 +2067,7 @@ function purgeDeletedCustomer_(body) {
     }
     saveDocsMap_(removeIdentityMappings_(docsMap));
     saveManualMap_(removeIdentityMappings_(manualMap));
+    clearPdfRefreshQueueForIds_(deletedDriveIds);
 
     var folderAliases = loadCustomerFolderAliases_();
     Object.keys(folderAliases).forEach(function (key) {
@@ -3497,13 +3576,7 @@ function addCustomerLocked_(body) {
       var inactive = false;
       try {
         var mappedFile = DriveApp.getFileById(mappedId);
-        inactive = mappedFile.isTrashed();
-        if (!inactive) {
-          var parents = mappedFile.getParents();
-          while (parents.hasNext()) {
-            if (parents.next().getName().toUpperCase() === 'BIN') { inactive = true; break; }
-          }
-        }
+        inactive = mappedFile.isTrashed() || isWithinCustomerBin_(mappedFile);
       } catch (missingMappedFile) {
         inactive = true;
       }
