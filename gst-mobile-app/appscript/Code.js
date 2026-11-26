@@ -1431,20 +1431,24 @@ function deleteCustomer_(body) {
         if (invoiceIndex >= 0) invoiceNumbers.push(String(gstVals[g][invoiceIndex] || '').trim());
       }
     }
-    if (!upRowNumbers.length && !gstRowNumbers.length &&
-        !customerDocId_(customer) && !customerFolder_(customer, false)) {
+    var docsMap = loadJsonProperty_('DOCS_MAP');
+    var manualMap = loadManualMap_();
+    var hasMappedDoc = Object.keys(docsMap).some(function (key) {
+      return identity.matches(key) && !!docsMap[key];
+    }) || Object.keys(manualMap).some(function (key) {
+      return identity.matches(key) && !!manualMap[key];
+    });
+    var pdfFolder = customerFolder_(customer, false);
+    if (!upRowNumbers.length && !gstRowNumbers.length && !hasMappedDoc && !pdfFolder) {
       throw new Error('No active sheet records, mapped document or archived PDF folder was found for ' + customer);
     }
 
-    var docsMap = loadJsonProperty_('DOCS_MAP');
-    var manualMap = loadManualMap_();
     var movedDocRecords = collectCustomerDocs_(identity, invoiceNumbers, docsMap, manualMap);
     var docIds = {};
     movedDocRecords.forEach(function (item) { docIds[item.id] = true; });
     var docMapEntries = mapEntriesForIdentity_(docsMap, identity, docIds);
     var manualMapEntries = mapEntriesForIdentity_(manualMap, identity, docIds);
 
-    var pdfFolder = customerFolder_(customer, false);
     var pdfFolderRecord = null;
     if (pdfFolder) {
       pdfFolderRecord = {
@@ -1620,6 +1624,12 @@ function validateRestoreHasNoConflict_(manifest) {
     if (upNameIndex >= 0 && identity.matches(upVals[r][upNameIndex]))
       throw new Error('A customer with this name is already active. Rename or remove the active record before restoring.');
   }
+  var gstNameIndex = colOf_(gstVals[0], 'Customer Name');
+  for (var gr = 1; gr < gstVals.length; gr++) {
+    if (gstNameIndex >= 0 && identity.matches(gstVals[gr][gstNameIndex]))
+      throw new Error('A GST RECORDS entry for this customer is already active. Remove or rename the active records before restoring.');
+  }
+
   var invIndex = colOf_(gstVals[0], 'Invoice No');
   var existing = {};
   for (var g = 1; g < gstVals.length; g++) {
@@ -1628,6 +1638,16 @@ function validateRestoreHasNoConflict_(manifest) {
   (manifest.invoiceNumbers || []).forEach(function (invoiceNo) {
     if (existing[invoiceNo]) throw new Error('Invoice ' + invoiceNo + ' already exists in active GST RECORDS. Restore was stopped to avoid duplicates.');
   });
+
+  var docsMap = loadJsonProperty_('DOCS_MAP');
+  var manualMap = loadManualMap_();
+  var hasActiveDocument = Object.keys(docsMap).some(function (key) {
+    return identity.matches(key) && !!docsMap[key];
+  }) || Object.keys(manualMap).some(function (key) {
+    return identity.matches(key) && !!manualMap[key];
+  });
+  if (hasActiveDocument)
+    throw new Error('A Google Doc mapping for this customer is already active. Resolve the active mapping before restoring.');
 }
 
 function restoreDeletedCustomer_(body) {
