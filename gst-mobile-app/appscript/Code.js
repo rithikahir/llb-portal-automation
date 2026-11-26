@@ -1267,18 +1267,17 @@ function firstParentId_(driveItem) {
 }
 
 /**
- * DriveApp Folder has addFolder/removeFolder operations rather than File.moveTo.
- * Reparent a customer archive folder while retaining its original file ID.
+ * Move a PDF archive folder while retaining its Drive ID and contents.
+ * Folder.moveTo is the supported DriveApp operation for reparenting folders.
  */
 function moveDriveFolder_(folderId, sourceParentId, destinationParent) {
   var folder = DriveApp.getFolderById(folderId);
   var source = DriveApp.getFolderById(sourceParentId);
-  source.removeFolder(folder);
   try {
-    destinationParent.addFolder(folder);
+    folder.moveTo(destinationParent);
   } catch (err) {
-    // Restore the original parent if adding to the destination fails.
-    try { source.addFolder(folder); } catch (rollbackErr) {}
+    // Best-effort rollback if the destination move fails partway through.
+    try { folder.moveTo(source); } catch (rollbackErr) {}
     throw err;
   }
   return folder;
