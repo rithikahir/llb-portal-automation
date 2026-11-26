@@ -1178,6 +1178,9 @@ function restoreSheetSnapshot_(sheet, snapshot, kind, identity) {
   var currentNameIndex = binHeaderIndex_(currentHeaders, kind === 'gst' ? 'Customer Name' : 'Customer name');
   var existingInvoices = {};
   var existingNames = {};
+  var existingSrNumbers = {};
+  var maxSrNumber = 0;
+  var srColumn = kind === 'upcoming' ? upcomingSrNoColumn_(currentHeaders) : -1;
   var currentValues = sheet.getDataRange().getValues();
   for (var r = 1; r < currentValues.length; r++) {
     if (kind === 'gst' && currentInvoiceIndex >= 0) {
@@ -1186,6 +1189,13 @@ function restoreSheetSnapshot_(sheet, snapshot, kind, identity) {
     if (kind === 'upcoming' && currentNameIndex >= 0) {
       var currentName = String(currentValues[r][currentNameIndex] || '').trim();
       if (currentName) existingNames[normName_(currentName)] = true;
+      if (srColumn >= 0) {
+        var currentSr = parseInt(currentValues[r][srColumn], 10);
+        if (isFinite(currentSr) && currentSr > 0) {
+          existingSrNumbers[String(currentSr)] = true;
+          maxSrNumber = Math.max(maxSrNumber, currentSr);
+        }
+      }
     }
   }
 
@@ -1222,6 +1232,19 @@ function restoreSheetSnapshot_(sheet, snapshot, kind, identity) {
     if (kind === 'gst') {
       if (savedInvoice) existingInvoices[savedInvoice] = true;
     } else if (kind === 'upcoming') {
+      // Keep the old Sr No when it is still free; otherwise allocate the
+      // next available number so onboarding after deletion cannot create a
+      // duplicate when the customer is later restored.
+      if (srColumn >= 0) {
+        var restoredSr = parseInt(values[srColumn], 10);
+        if (!(restoredSr > 0) || existingSrNumbers[String(restoredSr)]) {
+          restoredSr = maxSrNumber + 1;
+          values[srColumn] = restoredSr;
+          sheet.getRange(rowNumber, srColumn + 1).setValue(restoredSr);
+        }
+        existingSrNumbers[String(restoredSr)] = true;
+        maxSrNumber = Math.max(maxSrNumber, restoredSr);
+      }
       if (savedName) existingNames[normName_(savedName)] = true;
       var expireIndex = binHeaderIndex_(currentHeaders, 'Expire Date');
       if (expireIndex >= 0) sheet.getRange(rowNumber, expireIndex + 1).setNumberFormat('dd/mm/yy');
@@ -1735,6 +1758,25 @@ function purgeDeletedCustomer_(body) {
   try {
     var info = binEntryById_(body.deleted_id);
     var customer = info.manifest.customer;
+    var aliasesToRemove = {};
+    (info.manifest.identityAliases || []).forEach(function (key) { aliasesToRemove[String(key)] = true; });
+    aliasesToRemove[normName_(customer)] = true;
+
+    // Delete only this customer's mapping aliases. The archived assets are
+    // then permanently removed through Drive API DELETE.
+    var folderAliases = loadCustomerFolderAliases_();
+    Object.keys(folderAliases).forEach(function (key) {
+      if (aliasesToRemove[key]) delete folderAliases[key];
+    });
+    PROPS.setProperty('CUSTOMER_FOLDER_ALIASES', JSON.stringify(folderAliases));
+
+    var nameAliases = loadJsonProperty_('CUSTOMER_NAME_ALIASES');
+    Object.keys(nameAliases).forEach(function (key) {
+      if (aliasesToRemove[key] || aliasesToRemove[normName_(nameAliases[key])]) delete nameAliases[key];
+    });
+    PROPS.setProperty('CUSTOMER_NAME_ALIASES', JSON.stringify(nameAliases));
+    customerNameAliasCache_ = nameAliases;
+
     permanentlyDeleteDriveTree_(info.folder);
     return { ok: true, permanently_deleted: true, customer: customer };
   } finally {
