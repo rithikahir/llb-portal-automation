@@ -3369,7 +3369,7 @@ function addCustomerLocked_(body) {
   var requestedDocName = String(body.doc_name || '').trim();
   if (!requestedDocName) {
     var firstNamePart = name.split(/\s+/)[0];
-    requestedDocName = 'BILL_' + firstNamePart.toUpperCase();
+    requestedDocName = firstNamePart.toUpperCase() + '_BILL';
   }
   var docName = sanitizeFile_(requestedDocName);
   if (!docName) throw new Error('A valid Google Doc filename is required.');
@@ -3377,7 +3377,13 @@ function addCustomerLocked_(body) {
   var userid = String(body.userid || '').trim();
   var amount = Number(body.amount);
   var months = parseInt(body.duration_months, 10);
-  var desc = String(body.description || '').trim();
+  var desc = String(body.description || '')
+    .replace(/\\r\\n|\\n|\\r|\/n/gi, '\n')
+    .replace(/\r\n?/g, '\n')
+    .split('\n')
+    .map(function (line) { return line.replace(/\s+/g, ' ').trim(); })
+    .filter(function (line) { return !!line; })
+    .join('\n');
   var mode = String(body.payment_mode || '').trim() || 'Cash';
   var gstin = gstinDocumentValue_(body.gstin);
 
@@ -3413,8 +3419,6 @@ function addCustomerLocked_(body) {
   var iExp = colOf_(upHeaders, 'Expire Date');
   var iSrNo = upcomingSrNoColumn_(upHeaders);
   var iDur = colOf_(upHeaders, COL_DURATION);
-  var iAddr = colOf_(upHeaders, COL_ADDRESS);
-  var iUser = colOf_(upHeaders, COL_USERID);
   if (iName < 0 || iExp < 0) throw new Error('UPCOMING BILLS needs "Customer name" and "Expire Date" columns.');
   if (iSrNo < 0) throw new Error('UPCOMING BILLS needs an Sr No column (accepted headers: Sr No, Sr. No., S.No., Serial No).');
 
@@ -3552,7 +3556,7 @@ function addCustomerLocked_(body) {
       sgst: sgst,
       total: total,
       mode: mode,
-      payment_status: 'Paid'
+      payment_status: 'Pending'
     });
     writeBillPeriod_(gst, ensureBillPeriodCol_(gst), firstGstRow - 1, periodStart, periodEnd);
 
@@ -3563,8 +3567,6 @@ function addCustomerLocked_(body) {
     expCell.setNumberFormat('dd/mm/yy');
     expCell.setValue(periodEnd);
     if (iDur >= 0) up.getRange(newRow, iDur + 1).setValue(durationText_(months));
-    if (address && iAddr >= 0) up.getRange(newRow, iAddr + 1).setValue(address);
-    if (userid && iUser >= 0) up.getRange(newRow, iUser + 1).setValue(userid);
     sortUpcomingByExpire_(up, iExp);
 
     map[sheetName] = copyId;
