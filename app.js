@@ -1109,6 +1109,27 @@ function renderBillEdit(app, params) {
 }
 
 /* ------------------------------------------------------ onboarding (new) */
+function onboardingDefaultDocName_(customerName) {
+  var firstNamePart = String(customerName || '').trim().split(/\s+/)[0] || '';
+  return firstNamePart ? firstNamePart.toUpperCase() + '_BILL' : '';
+}
+
+function onboardingDefaultDescription_(months) {
+  months = parseInt(months, 10) || 1;
+  return ['HIGH SPEED 100 MBPS',
+    'TRULY UNLIMITED ' + months + (months === 1 ? ' MONTH' : ' MONTHS') + ' PLAN.'].join('\n');
+}
+
+function normalizeOnboardingDescription_(value) {
+  return String(value || '')
+    .replace(/\r\n?/g, '\n')
+    .replace(/(?:\\+r\\+n|\\+n|\/n)/gi, '\n')
+    .split('\n')
+    .map(function (line) { return line.replace(/[ \t]+/g, ' ').trim(); })
+    .filter(Boolean)
+    .join('\n');
+}
+
 function renderAddCustomer(app) {
   app.innerHTML =
     '<div class="overlay"><div class="ohdr">' +
@@ -1136,7 +1157,7 @@ function renderAddCustomer(app) {
     '<div class="field"><label>Bill period starts *</label>' +
     '<input id="a_start" type="date" required></div>' +
     '<div class="field"><label>Plan description (each line appears in the Plan column) *</label>' +
-    '<textarea id="a_desc" required data-auto="1">HIGH SPEED 100 MBPS\nTRULY UNLIMITED 1 MONTH PLAN.</textarea></div>' +
+    '<textarea id="a_desc" required data-auto="1"></textarea></div>' +
     '<div class="grid2">' +
     '<div class="field"><label>Customer GSTIN / UIN (optional)</label><input id="a_gstin" placeholder="27ABCDE1234F1Z5"></div>' +
     '<div class="field"><label>User ID *</label><input id="a_userid" placeholder="e.g. SHARMA01" required></div>' +
@@ -1160,8 +1181,7 @@ function renderAddCustomer(app) {
   docNameField.oninput = function () { this.dataset.auto = '0'; };
   $('#a_name').oninput = function () {
     if (docNameField.dataset.auto === '1') {
-      var firstNamePart = this.value.trim().split(/\s+/)[0] || '';
-      docNameField.value = firstNamePart ? firstNamePart.toUpperCase() + '_BILL' : '';
+      docNameField.value = onboardingDefaultDocName_(this.value);
     }
   };
   var todayISO = function () {
@@ -1190,12 +1210,12 @@ function renderAddCustomer(app) {
       '<div class="line"><span>Invoice number</span><b>Automatically assigned</b></div>';
   };
   var descField = $('#a_desc');
+  descField.dataset.auto = '1';
+  descField.value = onboardingDefaultDescription_(1);
   descField.oninput = function () { this.dataset.auto = '0'; };
   $('#a_months').onchange = function () {
     if (descField.dataset.auto === '1') {
-      var selectedMonths = parseInt(this.value, 10) || 1;
-      descField.value = 'HIGH SPEED 100 MBPS\nTRULY UNLIMITED ' + selectedMonths +
-        (selectedMonths === 1 ? ' MONTH' : ' MONTHS') + ' PLAN.';
+      descField.value = onboardingDefaultDescription_(this.value);
     }
     recalc();
   };
@@ -1212,7 +1232,7 @@ function renderAddCustomer(app) {
     var m = parseInt($('#a_months').value, 10) || 1;
     var ad = $('#a_address').value.trim();
     var uid = $('#a_userid').value.trim();
-    var ds = $('#a_desc').value.trim();
+    var ds = normalizeOnboardingDescription_($('#a_desc').value);
     var start = $('#a_start').value;
     if (!nm) { toast('Enter the customer name', true); return; }
     if (!docName) { toast('Enter a Google Doc filename', true); return; }
