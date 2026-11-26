@@ -3493,7 +3493,7 @@ function addCustomerLocked_(body) {
   var requestedDocName = String(body.doc_name || '').trim();
   if (!requestedDocName) {
     var firstNamePart = name.split(/\s+/)[0];
-    requestedDocName = 'BILL_' + firstNamePart;
+    requestedDocName = 'BILL_' + firstNamePart.toUpperCase();
   }
   var docName = sanitizeFile_(requestedDocName);
   if (!docName) throw new Error('A valid Google Doc filename is required.');
