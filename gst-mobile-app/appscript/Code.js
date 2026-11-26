@@ -111,7 +111,7 @@ function doPost(e) {
     if (body.action === 'list_deleted') return jsonOut_(listDeletedCustomers_(body));
     if (body.action === 'restore_customer') return jsonOut_(restoreDeletedCustomer_(body));
     if (body.action === 'purge_deleted_customer') return jsonOut_(purgeDeletedCustomer_(body));
-    if (body.action === 'cleanup_deleted_customer') return jsonOut_(cleanupDeletedCustomer_(body));
+
     return jsonOut_({ ok: false, error: 'unknown action: ' + body.action });
   } catch (err) {
     return jsonOut_({ ok: false, error: String(err && err.message || err) });
@@ -127,7 +127,7 @@ function doGet() {
                               'list_pdfs', 'get_pdf', 'map_doc', 'add_customer',
                     'repair_doc', 'update_payment', 'refresh_pdf',
                     'bill_prefill', 'bill_edit_prefill', 'edit_bill', 'backfill_periods',
-                    'delete_customer', 'list_deleted', 'restore_customer', 'purge_deleted_customer', 'cleanup_deleted_customer',
+                    'delete_customer', 'list_deleted', 'restore_customer', 'purge_deleted_customer',
                               'debug_rebuild'] });
 }
 
@@ -4813,4 +4813,18 @@ function rupeeWords_(n) {
   if (thousand) parts.push(three(thousand) + ' THOUSAND');
   if (rest) parts.push(three(rest));
   return parts.join(' ').replace(/\s+/g, ' ').trim();
+}
+
+
+/**
+ * ONE-TIME ADMIN UTILITY.
+ * Run this from the Apps Script editor once to clean up the old Rithik Ahir
+ * record created before automatic permanent-delete mapping cleanup existed.
+ * It refuses to proceed if active sheet records still exist.
+ * Remove this wrapper after the one-time run succeeds.
+ */
+function runRithikAhirLegacyCleanup() {
+  var result = cleanupDeletedCustomer_({ customer: 'Rithik Ahir' });
+  Logger.log(JSON.stringify(result));
+  return result;
 }
