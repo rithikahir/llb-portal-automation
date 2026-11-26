@@ -111,6 +111,7 @@ function doPost(e) {
     if (body.action === 'list_deleted') return jsonOut_(listDeletedCustomers_(body));
     if (body.action === 'restore_customer') return jsonOut_(restoreDeletedCustomer_(body));
     if (body.action === 'purge_deleted_customer') return jsonOut_(purgeDeletedCustomer_(body));
+    if (body.action === 'cleanup_deleted_customer') return jsonOut_(cleanupDeletedCustomer_(body));
     return jsonOut_({ ok: false, error: 'unknown action: ' + body.action });
   } catch (err) {
     return jsonOut_({ ok: false, error: String(err && err.message || err) });
@@ -1130,6 +1131,120 @@ function rememberCustomerRenameAliases_(oldNames, newName, docId, canonicalGstNa
 /* ------------------------------------------------------- customer recycle bin */
 
 /** A dedicated recycle bin under the Gst_Bills source folder. */
+
+/**
+ * One-time repair for customers permanently deleted before map cleanup was
+ * included in purgeDeletedCustomer_. Only runs when no active sheet records
+ * remain for the selected customer identity.
+ *
+ * Existing mapped Docs and archived PDF folders are sent to Drive trash;
+ * mapping and alias metadata are removed so the customer name can be reused.
+ */
+function cleanupDeletedCustomer_(body) {
+  var customer = String(body.customer || '').trim();
+  if (!customer) throw new Error('Enter the name of the previously deleted customer.');
+
+  var lock = LockService.getScriptLock();
+  if (!lock.tryLock(30000)) throw new Error('Another billing or customer operation is running. Try again.');
+  try {
+    var identity = customerIdentityContext_(customer);
+    var ss = SpreadsheetApp.openById(SHEET_ID);
+    var up = ss.getSheetByName(UPCOMING_SHEET);
+    var gst = ss.getSheetByName(GST_SHEET);
+    if (!up || !gst) throw new Error('Required spreadsheet tabs were not found.');
+
+    var upVals = up.getDataRange().getValues();
+    var gstVals = gst.getDataRange().getValues();
+    var upNameCol = colOf_(upVals[0], 'Customer name');
+    var gstNameCol = colOf_(gstVals[0], 'Customer Name');
+    var activeUpcoming = [], activeGst = [];
+    for (var u = 1; u < upVals.length; u++) {
+      if (upNameCol >= 0 && identity.matches(upVals[u][upNameCol])) {
+        activeUpcoming.push(String(upVals[u][upNameCol] || ''));
+      }
+    }
+    for (var g = 1; g < gstVals.length; g++) {
+      if (gstNameCol >= 0 && identity.matches(gstVals[g][gstNameCol])) {
+        activeGst.push(String(gstVals[g][gstNameCol] || ''));
+      }
+    }
+    if (activeUpcoming.length || activeGst.length) {
+      throw new Error('Cleanup blocked because active records still exist. UPCOMING BILLS: ' +
+        activeUpcoming.length + '; GST RECORDS: ' + activeGst.length +
+        '. Delete or reconcile those records first.');
+    }
+
+    var docsMap = loadJsonProperty_('DOCS_MAP');
+    var manualMap = loadManualMap_();
+    var docIds = {};
+    function collectEntries_(currentMap) {
+      var entries = {};
+      Object.keys(currentMap).forEach(function (key) {
+        var id = String(currentMap[key] || '');
+        if (identity.matches(key)) {
+          entries[key] = currentMap[key];
+          if (id) docIds[id] = true;
+        }
+      });
+      return entries;
+    }
+    var docEntries = collectEntries_(docsMap);
+    var manualEntries = collectEntries_(manualMap);
+
+    // Remove stale Docs associated with this deleted identity from the active
+    // source folder by sending them to Drive trash. Do not touch unrelated Docs.
+    var trashedDocs = [];
+    Object.keys(docIds).forEach(function (id) {
+      try {
+        var file = DriveApp.getFileById(id);
+        if (!file.isTrashed() && file.getMimeType() === MimeType.GOOGLE_DOCS) {
+          file.setTrashed(true);
+          trashedDocs.push(id);
+        }
+      } catch (missingFile) {
+        // A permanently removed Drive file is already clean.
+      }
+    });
+
+    var pdfFolder = customerFolder_(customer, false);
+    var trashedPdfFolder = false;
+    if (pdfFolder) {
+      pdfFolder.setTrashed(true);
+      trashedPdfFolder = true;
+    }
+
+    Object.keys(docEntries).forEach(function (key) { delete docsMap[key]; });
+    Object.keys(manualEntries).forEach(function (key) { delete manualMap[key]; });
+    saveDocsMap_(docsMap);
+    saveManualMap_(manualMap);
+
+    var folderAliases = loadCustomerFolderAliases_();
+    Object.keys(folderAliases).forEach(function (key) {
+      if (identity.matches(key)) delete folderAliases[key];
+    });
+    PROPS.setProperty('CUSTOMER_FOLDER_ALIASES', JSON.stringify(folderAliases));
+
+    var nameAliases = loadJsonProperty_('CUSTOMER_NAME_ALIASES');
+    Object.keys(nameAliases).forEach(function (key) {
+      if (identity.matches(key) || identity.matches(nameAliases[key])) delete nameAliases[key];
+    });
+    PROPS.setProperty('CUSTOMER_NAME_ALIASES', JSON.stringify(nameAliases));
+    customerNameAliasCache_ = nameAliases;
+
+    return {
+      ok: true,
+      customer: customer,
+      removed_doc_mappings: Object.keys(docEntries).length,
+      removed_manual_doc_mappings: Object.keys(manualEntries).length,
+      trashed_orphan_docs: trashedDocs.length,
+      trashed_pdf_folder: trashedPdfFolder,
+      active_upcoming_rows: 0,
+      active_gst_rows: 0
+    };
+  } finally {
+    lock.releaseLock();
+  }
+}
 function customerBinFolder_(create) {
   var root = docsFolder_();
   var it = root.getFoldersByName('BIN');
@@ -1837,28 +1952,61 @@ function purgeDeletedCustomer_(body) {
   try {
     var info = binEntryById_(body.deleted_id);
     var customer = info.manifest.customer;
+    var identity = customerIdentityContext_(customer);
     var aliasesToRemove = {};
     (info.manifest.identityAliases || []).forEach(function (key) { aliasesToRemove[String(key)] = true; });
     aliasesToRemove[normName_(customer)] = true;
 
-    // First remove the Drive tree. If the API reports a failure, keep the
-    // manifest and all alias metadata intact so the customer can be restored.
+    // Gather every map key and document ID recorded for this deleted identity.
+    var mappedIds = {};
+    function addMappedIds_(entries) {
+      Object.keys(entries || {}).forEach(function (key) {
+        var id = String(entries[key] || '');
+        if (id) mappedIds[id] = true;
+      });
+    }
+    addMappedIds_(info.manifest.docMapEntries);
+    addMappedIds_(info.manifest.manualMapEntries);
+    (info.manifest.movedDocs || []).forEach(function (item) {
+      if (item && item.id) mappedIds[String(item.id)] = true;
+    });
+
+    // First remove the Drive tree. If the API reports a failure, keep all
+    // mapping and alias metadata intact so the customer can still be restored.
     permanentlyDeleteDriveTree_(info.folder);
+
+    // A permanent delete must remove both auto and manual document mappings.
+    var docsMap = loadJsonProperty_('DOCS_MAP');
+    var manualMap = loadManualMap_();
+    function removeIdentityMappings_(currentMap) {
+      Object.keys(currentMap).forEach(function (key) {
+        var id = String(currentMap[key] || '');
+        if (identity.matches(key) || aliasesToRemove[normName_(key)] || (id && mappedIds[id])) {
+          delete currentMap[key];
+        }
+      });
+      return currentMap;
+    }
+    saveDocsMap_(removeIdentityMappings_(docsMap));
+    saveManualMap_(removeIdentityMappings_(manualMap));
 
     var folderAliases = loadCustomerFolderAliases_();
     Object.keys(folderAliases).forEach(function (key) {
-      if (aliasesToRemove[key]) delete folderAliases[key];
+      if (aliasesToRemove[key] || identity.matches(key)) delete folderAliases[key];
     });
     PROPS.setProperty('CUSTOMER_FOLDER_ALIASES', JSON.stringify(folderAliases));
 
     var nameAliases = loadJsonProperty_('CUSTOMER_NAME_ALIASES');
     Object.keys(nameAliases).forEach(function (key) {
-      if (aliasesToRemove[key] || aliasesToRemove[normName_(nameAliases[key])]) delete nameAliases[key];
+      if (aliasesToRemove[key] || identity.matches(key) ||
+          aliasesToRemove[normName_(nameAliases[key])] ||
+          identity.matches(nameAliases[key])) delete nameAliases[key];
     });
     PROPS.setProperty('CUSTOMER_NAME_ALIASES', JSON.stringify(nameAliases));
     customerNameAliasCache_ = nameAliases;
 
-    return { ok: true, permanently_deleted: true, customer: customer };
+    return { ok: true, permanently_deleted: true, customer: customer,
+             removed_doc_mappings: true, removed_manual_doc_mappings: true };
   } finally {
     lock.releaseLock();
   }
@@ -3263,7 +3411,13 @@ function addCustomerLocked_(body) {
     throw new Error('For a mismatch-free onboarding, Customer Name, GST RECORDS name and UPCOMING BILLS name must be identical. Please use one customer name.');
   }
   var sheetName = name;
-  var docName = sanitizeFile_(name);
+  var requestedDocName = String(body.doc_name || '').trim();
+  if (!requestedDocName) {
+    var firstNamePart = name.split(/\s+/)[0];
+    requestedDocName = 'BILL_' + firstNamePart;
+  }
+  var docName = sanitizeFile_(requestedDocName);
+  if (!docName) throw new Error('A valid Google Doc filename is required.');
   var address = String(body.address || '').replace(/\s*\r?\n\s*/g, ', ').trim();
   var userid = String(body.userid || '').trim();
   var amount = Number(body.amount);
@@ -3332,13 +3486,41 @@ function addCustomerLocked_(body) {
     }
   }
 
-  var map;
-  try { map = JSON.parse(PROPS.getProperty('DOCS_MAP') || '{}'); } catch (mapError) { map = {}; }
-  Object.keys(map).forEach(function (mappedName) {
-    if (mappedName.toLowerCase() === sheetName.toLowerCase() && map[mappedName]) {
-      throw new Error('A Google Doc is already mapped to this customer: ' + mappedName);
-    }
+  var map = loadJsonProperty_('DOCS_MAP');
+  var manualMap = loadManualMap_();
+  var requestedIdentity = customerIdentityContext_(sheetName);
+  var conflictingMapKeys = [];
+  [map, manualMap].forEach(function (currentMap) {
+    Object.keys(currentMap).forEach(function (mappedName) {
+      if (!requestedIdentity.matches(mappedName) || !currentMap[mappedName]) return;
+      var mappedId = String(currentMap[mappedName]);
+      var inactive = false;
+      try {
+        var mappedFile = DriveApp.getFileById(mappedId);
+        inactive = mappedFile.isTrashed();
+        if (!inactive) {
+          var parents = mappedFile.getParents();
+          while (parents.hasNext()) {
+            if (parents.next().getName().toUpperCase() === 'BIN') { inactive = true; break; }
+          }
+        }
+      } catch (missingMappedFile) {
+        inactive = true;
+      }
+      if (inactive) {
+        delete currentMap[mappedName];
+      } else {
+        conflictingMapKeys.push(mappedName);
+      }
+    });
   });
+  // Persist removal of trashed/missing/soft-deleted map entries.
+  saveDocsMap_(map);
+  saveManualMap_(manualMap);
+  if (conflictingMapKeys.length) {
+    throw new Error('A Google Doc is still actively mapped to this customer (' +
+      conflictingMapKeys.join(', ') + '). Clean up the old deleted customer record before reusing the name.');
+  }
 
   // Keep the document filename aligned to the single customer name source.
   var docsRoot = docsFolder_();
