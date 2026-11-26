@@ -479,6 +479,7 @@ function hdrSub(tab) {
   var cs = state.data.customers;
   var s = dashboardStats_(cs);
   var when = state.savedAt ? new Date(state.savedAt).toLocaleString() : '';
+  if (tab === 'bin') return 'Deleted customers · restore or permanently delete';
   if (tab === 'today') {
     return s.total + ' customers · ' + s.renewals + ' renewals · ' + s.overdue + ' overdue' +
       (when ? ' · ' + when : '');
