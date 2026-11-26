@@ -1634,7 +1634,7 @@ function validateRestoreHasNoConflict_(manifest) {
 function restoreDeletedCustomer_(body) {
   var lock = LockService.getScriptLock();
   if (!lock.tryLock(30000)) throw new Error('Another billing or customer operation is running. Try again.');
-  var binInfo = null, movedBackDocs = [], movedBackPdf = false, rowsRestored = false;
+  var binInfo = null, movedBackDocs = [], movedBackPdf = false, rowsRestored = false, mapsRestored = false;
   var binDocs = null, binPdfs = null;
   try {
     binInfo = binEntryById_(body.deleted_id);
@@ -1663,14 +1663,17 @@ function restoreDeletedCustomer_(body) {
     var ss = SpreadsheetApp.openById(SHEET_ID);
     var up = ss.getSheetByName(UPCOMING_SHEET);
     var gst = ss.getSheetByName(GST_SHEET);
+    // Mark rollback as necessary before restoring the first row: a failure
+    // midway through either sheet must still remove any partially restored rows.
+    rowsRestored = true;
     restoreSheetSnapshot_(gst, manifest.gstSnapshot, 'gst');
     restoreSheetSnapshot_(up, manifest.upcomingSnapshot, 'upcoming');
-    rowsRestored = true;
 
     var docsMap = loadJsonProperty_('DOCS_MAP');
     var manualMap = loadManualMap_();
     saveDocsMap_(restoreMapEntries_(docsMap, manifest.docMapEntries));
     saveManualMap_(restoreMapEntries_(manualMap, manifest.manualMapEntries));
+    mapsRestored = true;
 
     var headers = up.getRange(1, 1, 1, up.getLastColumn()).getValues()[0];
     var expireIndex = colOf_(headers, 'Expire Date');
@@ -1724,6 +1727,14 @@ function restoreDeletedCustomer_(body) {
         deleteSheetRows_(gst2, gstRows);
       } catch (e3) {}
     }
+    if (mapsRestored && binInfo) {
+      try {
+        var currentDocsMap = loadJsonProperty_('DOCS_MAP');
+        var currentManualMap = loadManualMap_();
+        saveDocsMap_(removeMapEntries_(currentDocsMap, binInfo.manifest.docMapEntries));
+        saveManualMap_(removeMapEntries_(currentManualMap, binInfo.manifest.manualMapEntries));
+      } catch (e4) {}
+    }
     throw err;
   } finally {
     lock.releaseLock();
@@ -1732,7 +1743,7 @@ function restoreDeletedCustomer_(body) {
 
 /** Permanently remove a Drive item through Drive API v3 (not merely trash it). */
 function permanentlyDeleteDriveItem_(fileId) {
-  var url = 'https://www.googleapis.com/drive/v3/files/' + encodeURIComponent(fileId);
+  var url = 'https://www.googleapis.com/drive/v3/files/' + encodeURIComponent(fileId) + '?supportsAllDrives=true';
   var response = UrlFetchApp.fetch(url, {
     method: 'delete',
     headers: { Authorization: 'Bearer ' + ScriptApp.getOAuthToken() },
@@ -1762,8 +1773,10 @@ function purgeDeletedCustomer_(body) {
     (info.manifest.identityAliases || []).forEach(function (key) { aliasesToRemove[String(key)] = true; });
     aliasesToRemove[normName_(customer)] = true;
 
-    // Delete only this customer's mapping aliases. The archived assets are
-    // then permanently removed through Drive API DELETE.
+    // First remove the Drive tree. If the API reports a failure, keep the
+    // manifest and all alias metadata intact so the customer can be restored.
+    permanentlyDeleteDriveTree_(info.folder);
+
     var folderAliases = loadCustomerFolderAliases_();
     Object.keys(folderAliases).forEach(function (key) {
       if (aliasesToRemove[key]) delete folderAliases[key];
@@ -1777,7 +1790,6 @@ function purgeDeletedCustomer_(body) {
     PROPS.setProperty('CUSTOMER_NAME_ALIASES', JSON.stringify(nameAliases));
     customerNameAliasCache_ = nameAliases;
 
-    permanentlyDeleteDriveTree_(info.folder);
     return { ok: true, permanently_deleted: true, customer: customer };
   } finally {
     lock.releaseLock();
