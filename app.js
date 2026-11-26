@@ -1121,8 +1121,8 @@ function renderAddCustomer(app) {
     '<div class="field"><label>Customer name (used consistently on bill, sheet and Drive) *</label>' +
     '<input id="a_name" placeholder="e.g. Sharma Traders" autocomplete="organization" required></div>' +
     '<div class="field"><label for="a_docname">Google Doc filename *</label>' +
-    '<input id="a_docname" placeholder="e.g. BILL_Rithik" autocomplete="off" required>' +
-    '<div class="small">Defaults to BILL_ followed by the first part of the customer name. You can edit this filename independently.</div></div>' +
+    '<input id="a_docname" placeholder="e.g. RITHIK_BILL" autocomplete="off" required>' +
+    '<div class="small">Defaults to the first part of the customer name followed by _BILL. You can edit this filename independently.</div></div>' +
     '<div class="field"><label>Address (printed below the name) *</label>' +
     '<textarea id="a_address" placeholder="Street, area, Pune - PIN" required></textarea></div>' +
     '<div class="grid2">' +
@@ -1161,7 +1161,7 @@ function renderAddCustomer(app) {
   $('#a_name').oninput = function () {
     if (docNameField.dataset.auto === '1') {
       var firstNamePart = this.value.trim().split(/\s+/)[0] || '';
-      docNameField.value = firstNamePart ? 'BILL_' + firstNamePart.toUpperCase() : '';
+      docNameField.value = firstNamePart ? firstNamePart.toUpperCase() + '_BILL' : '';
     }
   };
   var todayISO = function () {
@@ -1194,7 +1194,7 @@ function renderAddCustomer(app) {
   $('#a_months').onchange = function () {
     if (descField.dataset.auto === '1') {
       var selectedMonths = parseInt(this.value, 10) || 1;
-      descField.value = 'HIGH SPEED 100 MBPS\\nTRULY UNLIMITED ' + selectedMonths +
+      descField.value = 'HIGH SPEED 100 MBPS\nTRULY UNLIMITED ' + selectedMonths +
         (selectedMonths === 1 ? ' MONTH' : ' MONTHS') + ' PLAN.';
     }
     recalc();
