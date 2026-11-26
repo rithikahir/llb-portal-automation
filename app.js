@@ -1465,13 +1465,32 @@ function renderPdfPages_(blob, container) {
       var next = function (i) {
         if (i > n) return Promise.resolve();
         return pdf.getPage(i).then(function (page) {
+          // Keep the displayed page at the fitted CSS size, but render the
+          // backing canvas at device-pixel resolution. The previous renderer
+          // used CSS pixels for both, which blurred text on Retina/high-DPI
+          // phones and when the browser scaled the canvas.
           var fit = (container.clientWidth || 320) / page.getViewport({ scale: 1 }).width;
-          var vp = page.getViewport({ scale: Math.max(Math.min(fit, 2), 0.3) });
+          var cssScale = Math.max(Math.min(fit, 2), 0.3);
+          var cssViewport = page.getViewport({ scale: cssScale });
+          var deviceScale = Math.max(1, Math.min(window.devicePixelRatio || 1, 3));
+          var renderViewport = page.getViewport({ scale: cssScale * deviceScale });
+
+          // Limit backing-store memory on unusually large screens/pages while
+          // preserving at least native-resolution rendering.
+          var pixelCount = renderViewport.width * renderViewport.height;
+          var maxPixels = 12000000;
+          if (pixelCount > maxPixels) {
+            deviceScale = Math.max(1, deviceScale * Math.sqrt(maxPixels / pixelCount));
+            renderViewport = page.getViewport({ scale: cssScale * deviceScale });
+          }
+
           var cv = document.createElement('canvas');
           cv.className = 'pdf-canvas';
-          cv.width = vp.width; cv.height = vp.height;
+          cv.width = Math.ceil(renderViewport.width);
+          cv.height = Math.ceil(renderViewport.height);
           container.appendChild(cv);
-          return page.render({ canvasContext: cv.getContext('2d'), viewport: vp })
+          var context = cv.getContext('2d', { alpha: false });
+          return page.render({ canvasContext: context, viewport: renderViewport })
             .promise.then(function () { return next(i + 1); });
         });
       };
