@@ -139,7 +139,11 @@ var API_LOADING_LABELS_ = {
   edit_bill: 'Saving changes…',
   add_customer: 'Creating customer…',
   get_pdf: 'Loading PDF…',
-  share_pdf: 'Opening share…'
+  share_pdf: 'Opening share…',
+  delete_customer: 'Moving customer to Bin…',
+  list_deleted: 'Loading Bin…',
+  restore_customer: 'Restoring customer…',
+  purge_deleted_customer: 'Deleting permanently…'
 };
 
 function startApiButtonLoading_(action) {
@@ -361,7 +365,7 @@ function renderSetup(app, retestOnly) {
 }
 
 /* --------------------------------------------------------------- tabs */
-var TABS = { today: 'Home', customers: 'Customers', expiries: 'Expiries', settings: 'Settings' };
+var TABS = { today: 'Home', customers: 'Customers', expiries: 'Expiries', bin: 'Bin', settings: 'Settings' };
 
 /* ---------------------------------------------------------- bill types ---
  * The dashboard is driven by a registry of bill types. The backend sends an
@@ -439,6 +443,7 @@ function renderTab(app, params) {
     navBtn('today', '🏠', 'Home', tab, '') +
     navBtn('customers', '👥', 'Customers', tab) +
     navBtn('expiries', '⏳', 'Expiries', tab) +
+    navBtn('bin', '🗑️', 'Bin', tab) +
     navBtn('settings', '⚙️', 'Settings', tab) +
     '</nav>';
   $('#refresh').onclick = function () { refreshData(true); };
@@ -462,6 +467,7 @@ function renderTab(app, params) {
   if (tab === 'today') renderDashboard(body);
   else if (tab === 'customers') renderCustomersTab(body);
   else if (tab === 'expiries') renderExpiriesTab(body);
+  else if (tab === 'bin') renderBinTab(body);
   else renderSettings(body);
 }
 function navBtn(tab, icon, label, active, extra) {
@@ -841,6 +847,29 @@ function renderExpiriesTab(body) {
 }
 
 /* ------------------------------------------------------ CUSTOMER DETAIL */
+function deleteCustomerFromApp_(customer) {
+  var name = String(customer && customer.name || '').trim();
+  if (!name) return;
+  var invoiceCount = (customer.invoices || []).length;
+  var message = 'Move "' + name + '" to Bin?\n\n' +
+    'This will remove the customer from the active app and UPCOMING BILLS, ' +
+    'and move their Google Docs and archived PDFs into Gst_Bills/BIN.\n\n' +
+    invoiceCount + ' invoice record(s) will be saved for restoration.\n\n' +
+    'You can restore this customer later from the Bin tab. Nothing will be permanently deleted.';
+  if (!confirm(message)) return;
+
+  busy(true, 'Moving customer and files to Bin…');
+  api('delete_customer', { customer: name }).then(function (result) {
+    busy(false);
+    toast('Moved to Bin ✓ ' + name);
+    back();
+    refreshData(false);
+  }).catch(function (err) {
+    busy(false);
+    toast('Could not delete customer: ' + err.message, true);
+  });
+}
+
 function renderCustomerDetail(app, params) {
   var c = null;
   if (state.data) {
@@ -855,6 +884,8 @@ function renderCustomerDetail(app, params) {
   if (!c) return;
   var bb = $('#billnow');
   if (bb) bb.onclick = function () { go(renderBillForm, { name: c.name }); };
+  var deleteButton = $('#deleteCustomer');
+  if (deleteButton) deleteButton.onclick = function () { deleteCustomerFromApp_(c); };
   // every archived PDF lives on Drive — tapping opens it from there
   $all('.pdfbtn[data-inv]:not(.paybtn)').forEach(function (b) {
     b.onclick = function () { openPdfViewer(b.dataset.inv); };
@@ -893,6 +924,7 @@ function detailBody(c) {
     (c.expire_iso
       ? '<div class="btn-row"><button class="btn primary" id="billnow" style="margin-top:6px">🧾 Update Bill / Bill Now</button></div>'
       : '<div class="small" style="margin-top:8px;color:var(--muted)">One-time bill customer — no renewal row on the sheet, so there is nothing to bill here. Invoices and PDFs stay fully available.</div>') +
+    '<div class="btn-row" style="margin-top:12px"><button class="btn" id="deleteCustomer" style="border-color:var(--danger);color:var(--danger)">🗑️ Move customer to Bin</button></div>' +
     '</div>';
 
   var hist = '<div class="section-title">Invoice history (' + c.invoices.length + ')</div>';
@@ -1577,6 +1609,80 @@ function renderPdfPages_(blob, container, zoomFactor) {
 }
 
 /* -------------------------------------------------------------- SETTINGS */
+/* ----------------------------------------------------------- recycle Bin */
+function renderBinTab(body) {
+  body.innerHTML = '<div class="wrap"><div class="empty"><span class="loading-spinner" aria-hidden="true"></span><div>Loading deleted customers…</div></div></div>';
+  api('list_deleted').then(function (response) {
+    var items = response && response.items ? response.items : [];
+    if (!items.length) {
+      body.innerHTML = '<div class="wrap"><div class="card"><div style="font-size:34px;text-align:center">🗑️</div>' +
+        '<div style="font-weight:800;text-align:center;margin-top:8px">Bin is empty</div>' +
+        '<div class="meta-line" style="text-align:center;margin-top:5px">Deleted customers will appear here. You can restore them or permanently delete them.</div></div></div>';
+      return;
+    }
+
+    body.innerHTML = '<div class="wrap">' +
+      '<div class="card"><div class="meta-line">Deleted customers are kept in <b>Gst_Bills/BIN</b>. Restore returns their Google Docs, archived PDFs and sheet records. Permanent deletion cannot be undone.</div></div>' +
+      items.map(function (item) {
+        var deletedAt = item.deleted_at ? new Date(item.deleted_at).toLocaleString() : 'Unknown';
+        return '<div class="card">' +
+          '<div class="row-flex"><div class="grow"><div class="cust-name">' + esc(item.customer) + '</div>' +
+          '<div class="meta-line">Deleted ' + esc(deletedAt) + '</div></div>' +
+          '<span class="chip red">In Bin</span></div>' +
+          '<div class="meta-line" style="margin-top:8px">' +
+          (Number(item.invoice_count || 0) + ' invoice record(s)') +
+          (item.expire_date ? ' · Expiry ' + esc(item.expire_date) : '') +
+          (item.upcoming_rows ? ' · ' + item.upcoming_rows + ' Upcoming row(s)' : '') +
+          '</div>' +
+          '<div class="btn-row" style="margin-top:12px">' +
+          '<button class="btn primary" data-restore-id="' + esc(item.id) + '">↩️ Restore</button>' +
+          '<button class="btn" data-purge-id="' + esc(item.id) + '" style="border-color:var(--danger);color:var(--danger)">Delete permanently</button>' +
+          '</div></div>';
+      }).join('') + '</div>';
+
+    $all('[data-restore-id]', body).forEach(function (button) {
+      button.onclick = function () {
+        var item = items.filter(function (x) { return x.id === button.dataset.restoreId; })[0];
+        if (!item) return;
+        if (!confirm('Restore "' + item.customer + '"?\n\nThe Google Docs and archived PDFs will return to their original Drive folders. The saved GST RECORDS and UPCOMING BILLS rows, including the expiry date, will be restored.')) return;
+        busy(true, 'Restoring customer…');
+        api('restore_customer', { deleted_id: item.id }).then(function (result) {
+          busy(false);
+          toast('Customer restored ✓ ' + result.customer);
+          refreshData(false);       // refreshData re-renders the current Bin tab
+        }).catch(function (err) {
+          busy(false);
+          toast('Restore failed: ' + err.message, true);
+        });
+      };
+    });
+
+    $all('[data-purge-id]', body).forEach(function (button) {
+      button.onclick = function () {
+        var item = items.filter(function (x) { return x.id === button.dataset.purgeId; })[0];
+        if (!item) return;
+        var message = 'Permanently delete "' + item.customer + '"?\n\n' +
+          'This permanently deletes the Google Docs, archived PDF folder, PDFs and Bin manifest for this customer from Drive.\n\n' +
+          'This action cannot be undone. Continue?';
+        if (!confirm(message)) return;
+        busy(true, 'Deleting customer permanently…');
+        api('purge_deleted_customer', { deleted_id: item.id }).then(function () {
+          busy(false);
+          toast('Permanently deleted ✓ ' + item.customer);
+          renderBinTab(body);
+        }).catch(function (err) {
+          busy(false);
+          toast('Permanent deletion failed: ' + err.message, true);
+        });
+      };
+    });
+  }).catch(function (err) {
+    body.innerHTML = '<div class="wrap"><div class="card"><div class="meta-line" style="color:var(--danger)">Could not load Bin: ' +
+      esc(err.message) + '</div><button class="btn" id="retryBin">Retry</button></div></div>';
+    $('#retryBin').onclick = function () { renderBinTab(body); };
+  });
+}
+
 function renderSettings(body) {
   var cs = state.data ? state.data.customers.length : 0;
   body.innerHTML = '<div class="wrap">' +
