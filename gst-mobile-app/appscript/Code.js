@@ -127,7 +127,7 @@ function doGet() {
                               'list_pdfs', 'get_pdf', 'map_doc', 'add_customer',
                     'repair_doc', 'update_payment', 'refresh_pdf',
                     'bill_prefill', 'bill_edit_prefill', 'edit_bill', 'backfill_periods',
-                    'delete_customer', 'list_deleted', 'restore_customer', 'purge_deleted_customer',
+                    'delete_customer', 'list_deleted', 'restore_customer', 'purge_deleted_customer', 'cleanup_deleted_customer',
                               'debug_rebuild'] });
 }
 
